@@ -1,5 +1,3 @@
-# models/csv_model.py
-
 class CSVData:
     """
     Representa el CSV en memoria:
