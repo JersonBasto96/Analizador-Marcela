@@ -1,6 +1,7 @@
 from services.csv_service import CSVService, CSVServiceError
 from models.csv_model import CSVData
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
+from datetime import datetime
 
 class CSVController:
     """
@@ -76,7 +77,6 @@ class CSVController:
 
     def _extract_device_name(self, date_column: str) -> str:
         """Extrae nombre del dispositivo de forma más inteligente"""
-        # Limpiar patrones comunes
         clean_name = date_column
         patterns_to_remove = [
             'fecha hora', 'fecha/hora', 'fechahora', 'fecha - hora',
@@ -86,10 +86,8 @@ class CSVController:
         for pattern in patterns_to_remove:
             clean_name = clean_name.lower().replace(pattern, '')
         
-        # Limpiar caracteres especiales y espacios
         clean_name = ' '.join(clean_name.split()).strip()
         
-        # Capitalizar si está todo en minúsculas
         if clean_name and clean_name.islower():
             clean_name = clean_name.title()
             
@@ -98,7 +96,34 @@ class CSVController:
     def get_devices(self):
         return list(self.device_columns.keys())
 
-    def get_values_for_device(self, device_name: str):
+    def _parse_date(self, date_str: str) -> Optional[datetime]:
+        """Intenta convertir un string a datetime con múltiples formatos. Retorna None si falla."""
+        if not date_str:
+            return None
+            
+        formats = [
+            "%d/%m/%Y %H:%M:%S",  # 31/01/2023 14:30:00
+            "%d/%m/%Y %H:%M",     # 31/01/2023 14:30
+            "%d/%m/%Y",           # 31/01/2023
+            "%Y-%m-%d %H:%M:%S",  # 2023-01-31 14:30:00
+            "%Y-%m-%d %H:%M",     # 2023-01-31 14:30
+            "%Y-%m-%d",           # 2023-01-31
+            "%d-%m-%Y %H:%M:%S",  # 31-01-2023...
+            "%d-%m-%Y"
+        ]
+        
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str.strip(), fmt)
+            except ValueError:
+                continue
+        return None
+
+    def get_values_for_device(self, device_name: str) -> List[Tuple[str, str]]:
+        """
+        Obtiene los valores y los devuelve ORDENADOS cronológicamente.
+        Sigue devolviendo strings para compatibilidad con la UI.
+        """
         if not self.csv_data:
             raise CSVServiceError("No se ha cargado un CSV.")
         if device_name not in self.device_columns:
@@ -112,40 +137,57 @@ class CSVController:
         except ValueError:
             raise CSVServiceError("Índices de columnas no encontrados en CSV.")
 
-        results = []
-        for row in self.csv_data.rows:
-            fecha = row[fecha_idx] if fecha_idx < len(row) else ""
-            valor = row[val_idx] if val_idx < len(row) else ""
-            results.append((fecha, valor))
-        return results
+        # Lista temporal para guardar (objeto_datetime, str_fecha, str_valor)
+        temp_data = []
 
-    # NUEVOS MÉTODOS DE ANÁLISIS
+        for row in self.csv_data.rows:
+            fecha_str = row[fecha_idx] if fecha_idx < len(row) else ""
+            valor_str = row[val_idx] if val_idx < len(row) else ""
+            
+            dt_obj = self._parse_date(fecha_str)
+            
+            # Si no se pudo parsear la fecha, usamos una fecha muy antigua o muy futura
+            # o simplemente la dejamos al final. Aquí usamos datetime.max para errores al final.
+            sort_key = dt_obj if dt_obj else datetime.max
+            
+            temp_data.append((sort_key, fecha_str, valor_str))
+
+        # Ordenar por la clave de fecha (sort_key)
+        temp_data.sort(key=lambda x: x[0])
+
+        # Retornar solo las columnas originales (fecha, valor) como strings
+        return [(item[1], item[2]) for item in temp_data]
+
+    # MÉTODOS DE ANÁLISIS
     def get_device_statistics(self, device_name: str) -> Dict:
         """Calcula estadísticas básicas para un dispositivo"""
         if device_name in self._analysis_cache:
             return self._analysis_cache[device_name]
             
+        # Usamos get_values_for_device para aprovechar que ya filtra vacíos
         values = self.get_values_for_device(device_name)
         numeric_values = []
         
-        for fecha, valor in values:
+        for _, valor in values:
             try:
-                # Intentar convertir a float, ignorar vacíos
                 if valor and valor.strip():
-                    num_val = float(valor)
+                    # Reemplazar coma por punto si es necesario (formato decimal español)
+                    clean_val = valor.replace(',', '.')
+                    num_val = float(clean_val)
                     numeric_values.append(num_val)
             except (ValueError, TypeError):
                 continue
         
+        total_regs = len(values)
         if not numeric_values:
             return {
-                "total_registros": len(values),
+                "total_registros": total_regs,
                 "registros_numericos": 0,
                 "error": "No hay valores numéricos para analizar"
             }
         
         stats = {
-            "total_registros": len(values),
+            "total_registros": total_regs,
             "registros_numericos": len(numeric_values),
             "consumo_promedio": round(sum(numeric_values) / len(numeric_values), 2),
             "consumo_maximo": round(max(numeric_values), 2),
