@@ -1,111 +1,120 @@
 import tkinter as tk
 from tkinter import ttk
-from typing import Dict
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.dates as mdates
 
 class AnalysisView(ttk.Frame):
-    """Vista para mostrar análisis estadísticos"""
+    """
+    Vista de Gráficas Inteligente:
+    - Detecta si es Potencia o Energía.
+    - Llama a los métodos correspondientes del controlador.
+    """
     
-    def __init__(self, parent, *args, **kwargs):
+    def __init__(self, parent, controller=None, y_label="Potencia (Watts)", title_prefix="Consumo", *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
+        self.controller = controller
+        self.y_label = y_label
+        self.title_prefix = title_prefix
+        self.is_energy_view = "Energía" in title_prefix # Bandera para saber qué pedir al controlador
         
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
         
-        # Pestaña de resumen
-        self.summary_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.summary_frame, text="Resumen General")
+        self.tabs = {}
+        for key in ['hora_exacta', 'ciclos', 'escalones', 'total']:
+            frame = ttk.Frame(self.notebook)
+            title = key.replace('_', ' ').title()
+            if key == 'total': title = "📊 TOTAL"
+            self.notebook.add(frame, text=title)
+            self.tabs[key] = self._setup_graph_tab(frame, key)
+
+    def _setup_graph_tab(self, parent, key):
+        ctrl_frame = ttk.Frame(parent)
+        ctrl_frame.pack(fill="x", padx=5, pady=5)
         
-        # Pestaña por dispositivo
-        self.device_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.device_frame, text="Por Dispositivo")
+        device_combo = None
+        if key != 'total':
+            ttk.Label(ctrl_frame, text="Visualizar:").pack(side="left")
+            device_combo = ttk.Combobox(ctrl_frame, state="readonly", values=["Todos"])
+            device_combo.set("Todos")
+            device_combo.pack(side="left", padx=10)
+            device_combo.bind("<<ComboboxSelected>>", lambda e, k=key, c=device_combo: self.plot_data(k, c.get()))
+
+        btn_refresh = ttk.Button(ctrl_frame, text="🔄 Actualizar Gráfica", 
+                                 command=lambda k=key, c=device_combo: self.plot_data(k, c.get() if c else None))
+        btn_refresh.pack(side="left")
+
+        fig, ax = plt.subplots(figsize=(5, 4), dpi=100)
+        canvas = FigureCanvasTkAgg(fig, master=parent)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        return {'fig': fig, 'ax': ax, 'canvas': canvas, 'combo': device_combo}
+
+    def update_devices(self, context_key, devices_list):
+        if context_key in self.tabs and self.tabs[context_key]['combo']:
+            combo = self.tabs[context_key]['combo']
+            combo['values'] = ["Todos"] + devices_list
+            if not combo.get(): combo.set("Todos")
+
+    def plot_data(self, context_key, selected_device="Todos"):
+        if not self.controller: return
         
-        self._setup_summary_tab()
-        self._setup_device_tab()
+        tab = self.tabs[context_key]
+        ax = tab['ax']
+        fig = tab['fig']
+        canvas = tab['canvas']
         
-    def _setup_summary_tab(self):
-        """Configurar pestaña de resumen general"""
-        self.summary_text = tk.Text(self.summary_frame, wrap="word", height=15, font=("Arial", 10))
-        scrollbar = ttk.Scrollbar(self.summary_frame, command=self.summary_text.yview)
-        self.summary_text.configure(yscrollcommand=scrollbar.set)
+        ax.clear()
+        ax.set_xlabel("Hora del Día")
+        ax.set_ylabel(self.y_label)
+        ax.grid(True, linestyle='--', alpha=0.6)
         
-        self.summary_text.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        scrollbar.pack(side="right", fill="y", pady=5)
+        locator = mdates.HourLocator(interval=2)
+        formatter = mdates.DateFormatter('%H:%M')
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(formatter)
+
+        plots_made = 0
         
-    def _setup_device_tab(self):
-        """Configurar pestaña de análisis por dispositivo"""
-        # Frame para selección
-        selection_frame = ttk.Frame(self.device_frame)
-        selection_frame.pack(fill="x", padx=5, pady=5)
+        # --- LÓGICA DE SELECCIÓN DE DATOS ---
         
-        ttk.Label(selection_frame, text="Dispositivo:").pack(side="left")
-        
-        self.device_combo = ttk.Combobox(selection_frame, state="readonly", font=("Arial", 10))
-        self.device_combo.pack(side="left", fill="x", expand=True, padx=5)
-        self.device_combo.bind("<<ComboboxSelected>>", self._on_device_select)
-        
-        # Área de resultados
-        self.device_text = tk.Text(self.device_frame, wrap="word", height=12, font=("Arial", 10))
-        scrollbar = ttk.Scrollbar(self.device_frame, command=self.device_text.yview)
-        self.device_text.configure(yscrollcommand=scrollbar.set)
-        
-        self.device_text.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        scrollbar.pack(side="right", fill="y", pady=5)
-        
-    def update_devices(self, devices: list):
-        """Actualizar lista de dispositivos disponibles"""
-        self.device_combo["values"] = devices
-        if devices:
-            self.device_combo.set(devices[0])
-            
-    def update_summary(self, statistics: Dict):
-        """Actualizar resumen general"""
-        self.summary_text.delete(1.0, tk.END)
-        
-        if not statistics:
-            self.summary_text.insert(1.0, "No hay datos para mostrar")
-            return
-            
-        text = "=== RESUMEN GENERAL ===\n\n"
-        for device, stats in statistics.items():
-            text += f"📊 {device}:\n"
-            if "error" in stats:
-                text += f"   ❌ {stats['error']}\n"
+        if context_key == 'total':
+            # 1. Gráfica TOTAL
+            if self.is_energy_view:
+                t_axis, y_axis = self.controller.get_total_energy_vector()
+                color = 'green'
             else:
-                text += f"   • Registros totales: {stats['total_registros']}\n"
-                text += f"   • Registros numéricos: {stats['registros_numericos']}\n"
-                text += f"   • Consumo promedio: {stats['consumo_promedio']:.2f}\n"
-                text += f"   • Consumo máximo: {stats['consumo_maximo']:.2f}\n"
-                text += f"   • Consumo mínimo: {stats['consumo_minimo']:.2f}\n"
-                text += f"   • Consumo total: {stats['consumo_total']:.2f}\n"
-            text += "\n"
+                t_axis, y_axis = self.controller.get_total_power_vector()
+                color = 'black'
+                
+            if t_axis:
+                ax.plot(t_axis, y_axis, label="Total Vivienda", color=color, linewidth=2)
+                ax.fill_between(t_axis, y_axis, alpha=0.2, color=color)
+                plots_made += 1
+                ax.set_title(f"{self.title_prefix} Total Acumulado" if self.is_energy_view else f"{self.title_prefix} Total Instantánea")
+                
+        else:
+            # 2. Gráficas POR SECCIÓN
+            devices = self.controller.get_devices(context_key)
+            if selected_device and selected_device != "Todos":
+                devices = [d for d in devices if d == selected_device]
             
-        self.summary_text.insert(1.0, text)
-        
-    def update_device_analysis(self, device: str, statistics: Dict):
-        """Actualizar análisis de dispositivo específico"""
-        self.device_text.delete(1.0, tk.END)
-        
-        if not statistics or "error" in statistics:
-            self.device_text.insert(1.0, f"No hay datos analíticos para {device}")
-            return
-            
-        text = f"=== ANÁLISIS DETALLADO: {device} ===\n\n"
-        text += f"📈 Métricas de Consumo:\n"
-        text += f"   • Consumo Promedio: {statistics['consumo_promedio']:.2f}\n"
-        text += f"   • Consumo Máximo: {statistics['consumo_maximo']:.2f}\n"
-        text += f"   • Consumo Mínimo: {statistics['consumo_minimo']:.2f}\n"
-        text += f"   • Consumo Total: {statistics['consumo_total']:.2f}\n\n"
-        
-        text += f"📊 Estadísticas de Datos:\n"
-        text += f"   • Registros Totales: {statistics['total_registros']}\n"
-        text += f"   • Registros Numéricos: {statistics['registros_numericos']}\n"
-        non_numeric = statistics['total_registros'] - statistics['registros_numericos']
-        text += f"   • Registros No Numéricos: {non_numeric}\n"
-        
-        self.device_text.insert(1.0, text)
-        
-    def _on_device_select(self, event):
-        """Manejar selección de dispositivo"""
-        device = self.device_combo.get()
-        if device and hasattr(self, "on_device_select"):
-            self.on_device_select(device)
+            for dev in devices:
+                if self.is_energy_view:
+                    t_axis, y_axis = self.controller.get_energy_profile(context_key, dev)
+                else:
+                    t_axis, y_axis = self.controller.get_power_profile_1min(context_key, dev)
+                    
+                if t_axis:
+                    ax.plot(t_axis, y_axis, label=dev)
+                    plots_made += 1
+
+            ax.set_title(f"{self.title_prefix}: {context_key.replace('_',' ').title()}")
+
+        if plots_made > 0:
+            ax.legend(loc='upper left', fontsize='small')
+            fig.autofmt_xdate()
+        else:
+            ax.text(0.5, 0.5, "Sin datos disponibles", ha='center', va='center')
+
+        canvas.draw()

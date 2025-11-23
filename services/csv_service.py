@@ -1,52 +1,90 @@
 import csv
 from typing import List
 from models.csv_model import CSVData
+import io
 
 class CSVServiceError(Exception):
     pass
 
 class CSVService:
     """
-    Lee CSV con autodetección de delimitador y normaliza filas.
-    No convierte decimales (deja todo como strings) — UI/negocio hará parse si lo necesita.
+    Servicio robusto para leer CSVs 'sucios'.
+    - Soporta múltiples codificaciones (UTF-8, Latin-1).
+    - Repara filas rotas por comas decimales (ej: 0,78 -> 0.78).
     """
 
     @staticmethod
     def read_csv(path: str) -> CSVData:
-        try:
-            with open(path, "r", encoding="utf-8", newline="") as f:
-                sample = f.read(4096)
-                f.seek(0)
-                # detectar dialecto (delimitador) entre los comunes
-                try:
-                    dialect = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"])
-                except Exception:
-                    # fallback: preferir coma, si hay tab en muestra usar tab
-                    if "\t" in sample:
-                        dialect = csv.excel_tab
-                    else:
-                        dialect = csv.excel
+        # 1. Intentar leer con diferentes codificaciones
+        encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']
+        lines = None
+        
+        for enc in encodings:
+            try:
+                with open(path, "r", encoding=enc, newline="") as f:
+                    lines = [line.strip() for line in f.readlines() if line.strip()]
+                break # Si lee bien, salimos del bucle
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                raise CSVServiceError(f"Error de lectura: {e}")
 
-                reader = csv.reader(f, dialect)
-                data = list(reader)
-        except Exception as e:
-            raise CSVServiceError(f"No se pudo leer el archivo: {e}")
+        if not lines:
+            raise CSVServiceError("No se pudo leer el archivo o está vacío (revise codificación).")
 
-        if not data:
-            raise CSVServiceError("El archivo CSV está vacío.")
+        # 2. Detectar delimitador basado en la primera línea (Header)
+        header_line = lines[0]
+        possible_delimiters = [',', ';', '\t', '|']
+        
+        # Contar ocurrencias y elegir el ganador
+        delimiter = max(possible_delimiters, key=lambda d: header_line.count(d))
+        
+        # Si no encontró ninguno, por defecto coma
+        if header_line.count(delimiter) == 0:
+            delimiter = ','
 
-        columns = [col.strip() for col in data[0]]
-        rows_raw = data[1:]
+        # 3. Parsear encabezado
+        reader = csv.reader(io.StringIO(header_line), delimiter=delimiter)
+        columns = next(reader)
+        columns = [c.strip() for c in columns]
+        expected_cols = len(columns)
 
-        # Normalizar filas: rellenar con "" o cortar si sobran columnas
-        normalized_rows: List[List[str]] = []
-        col_count = len(columns)
-        for i, row in enumerate(rows_raw):
+        # 4. Procesar filas con "Reparación de Decimales"
+        normalized_rows = []
+        
+        for line in lines[1:]:
+            # Parsear línea actual
+            row_reader = csv.reader(io.StringIO(line), delimiter=delimiter)
+            try:
+                row = next(row_reader)
+            except StopIteration:
+                continue
+
             row = [cell.strip() for cell in row]
-            if len(row) < col_count:
-                row = row + [""] * (col_count - len(row))
-            elif len(row) > col_count:
-                row = row[:col_count]
-            normalized_rows.append(row)
+            current_cols = len(row)
+
+            # CASO A: Fila Perfecta
+            if current_cols == expected_cols:
+                normalized_rows.append(row)
+            
+            # CASO B: Fila Rota (Tiene más columnas de las esperadas)
+            elif current_cols > expected_cols:
+                # Unimos las columnas sobrantes al final (asumiendo que es el valor decimal partido)
+                # Ejemplo: [Fecha, 0, 79] -> [Fecha, 0,79]
+                new_row = []
+                safe_part_idx = expected_cols - 1 
+                new_row.extend(row[:safe_part_idx])
+                
+                rest_of_row = row[safe_part_idx:]
+                # Unimos con coma para conservar formato visual original
+                reconstructed_value = ",".join(rest_of_row) 
+                
+                new_row.append(reconstructed_value)
+                normalized_rows.append(new_row)
+
+            # CASO C: Faltan columnas (Rellenar)
+            elif current_cols < expected_cols:
+                row = row + [""] * (expected_cols - current_cols)
+                normalized_rows.append(row)
 
         return CSVData(columns=columns, rows=normalized_rows)
