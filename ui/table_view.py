@@ -4,36 +4,27 @@ from tkinter import ttk
 class TableView(ttk.Frame):
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
-        
         control_frame = ttk.Frame(self)
         control_frame.pack(fill="x", pady=(0, 5))
-        
         ttk.Label(control_frame, text="Buscar:").pack(side="left", padx=(0, 5))
         self.search_var = tk.StringVar()
         self.search_entry = ttk.Entry(control_frame, textvariable=self.search_var, width=30)
         self.search_entry.pack(side="left", padx=(0, 10))
         self.search_entry.bind("<KeyRelease>", self._on_search)
-        
         self.clear_search_btn = ttk.Button(control_frame, text="Limpiar", command=self._clear_search)
         self.clear_search_btn.pack(side="left")
-        
         self.status_label = ttk.Label(control_frame, text="")
         self.status_label.pack(side="right")
-        
         tree_frame = ttk.Frame(self)
         tree_frame.pack(fill="both", expand=True)
-        
         self._tree = ttk.Treeview(tree_frame, show="headings")
         self._tree.pack(side="left", fill="both", expand=True)
-
         self._scroll_y = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
         self._scroll_y.pack(side="right", fill="y")
         self._tree.configure(yscrollcommand=self._scroll_y.set)
-
         self._scroll_x = ttk.Scrollbar(self, orient="horizontal", command=self._tree.xview)
         self._scroll_x.pack(side="bottom", fill="x")
         self._tree.configure(xscrollcommand=self._scroll_x.set)
-        
         self._all_data = []
         self._current_columns = []
 
@@ -43,12 +34,10 @@ class TableView(ttk.Frame):
             self._display_data(self._all_data)
             self.status_label.config(text=f"Mostrando todos los {len(self._all_data)} registros")
             return
-            
         filtered_data = []
         for row in self._all_data:
             if any(search_term in str(cell).lower() for cell in row):
                 filtered_data.append(row)
-        
         self._display_data(filtered_data)
         self.status_label.config(text=f"Mostrando {len(filtered_data)} de {len(self._all_data)} registros")
 
