@@ -7,7 +7,7 @@ from datetime import timedelta
 from ui.table_view import TableView
 
 # ========================================================
-#  CLASE 1: VISTA DE GRÁFICAS (POTENCIA) - SIN CAMBIOS
+#  CLASE 1: VISTA DE GRÁFICAS (POTENCIA)
 # ========================================================
 class AnalysisView(ttk.Frame):
     def __init__(self, parent, controller=None, y_label="Potencia (Watts)", title_prefix="Consumo", *args, **kwargs):
@@ -159,27 +159,23 @@ class AnalysisView(ttk.Frame):
         finally: top.config(cursor="")
 
 # ========================================================
-#  CLASE 2: VISTA DE TABLAS (ENERGÍA) - CON GRÁFICAS MENSUALES
+#  CLASE 2: VISTA DE TABLAS (ENERGÍA) + FACTURA
 # ========================================================
 class EnergySummaryView(ttk.Frame):
     def __init__(self, parent, controller=None, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
         self.controller = controller
-        
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
         
-        # Tab 1: Semanal
         self.tab_weekly = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_weekly, text="📅 Resumen Semanal")
         self._setup_weekly_tab()
         
-        # Tab 2: Mensual (Ahora contiene sub-tabs)
         self.tab_monthly_main = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_monthly_main, text="📆 Proyección Mensual")
         self._setup_monthly_main_structure()
 
-        # Tab 3: Factura
         self.tab_bill = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_bill, text="🧾 Factura Comparativa")
         self._setup_bill_tab()
@@ -193,16 +189,11 @@ class EnergySummaryView(ttk.Frame):
         self.table_weekly.pack(fill="both", expand=True, padx=5, pady=5)
 
     def _setup_monthly_main_structure(self):
-        """Crea las sub-pestañas para Datos y Gráficas dentro de Mensual"""
         self.nb_monthly = ttk.Notebook(self.tab_monthly_main)
         self.nb_monthly.pack(fill="both", expand=True, padx=5, pady=5)
-
-        # Sub-Tab A: Datos (Tabla)
         self.sub_monthly_data = ttk.Frame(self.nb_monthly)
         self.nb_monthly.add(self.sub_monthly_data, text="📋 Datos (Pareto)")
         self._setup_monthly_data_tab()
-
-        # Sub-Tab B: Gráficas (Pareto + Torta)
         self.sub_monthly_charts = ttk.Frame(self.nb_monthly)
         self.nb_monthly.add(self.sub_monthly_charts, text="📊 Gráficas de Análisis")
         self._setup_monthly_charts_tab()
@@ -216,32 +207,20 @@ class EnergySummaryView(ttk.Frame):
         self.table_monthly.pack(fill="both", expand=True, padx=5, pady=5)
 
     def _setup_monthly_charts_tab(self):
-        """Configura el área de gráficas: Torta y Pareto"""
-        # Scrollbar por si la pantalla es pequeña
         canvas_container = tk.Canvas(self.sub_monthly_charts)
         scrollbar = ttk.Scrollbar(self.sub_monthly_charts, orient="vertical", command=canvas_container.yview)
         self.scrollable_frame = ttk.Frame(canvas_container)
-
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas_container.configure(scrollregion=canvas_container.bbox("all"))
-        )
-
+        self.scrollable_frame.bind("<Configure>", lambda e: canvas_container.configure(scrollregion=canvas_container.bbox("all")))
         canvas_container.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         canvas_container.configure(yscrollcommand=scrollbar.set)
-
         canvas_container.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-
-        # Botón Refresh
         ttk.Button(self.scrollable_frame, text="🔄 Actualizar Gráficas", command=self.refresh_monthly_charts).pack(pady=5)
-
-        # Área Gráfica 1: Torta
+        
         self.fig_pie, self.ax_pie = plt.subplots(figsize=(6, 4), dpi=100)
         self.canvas_pie = FigureCanvasTkAgg(self.fig_pie, master=self.scrollable_frame)
         self.canvas_pie.get_tk_widget().pack(fill="x", expand=True, padx=10, pady=10)
-
-        # Área Gráfica 2: Pareto (Barras + Línea)
+        
         self.fig_pareto, self.ax_pareto = plt.subplots(figsize=(7, 5), dpi=100)
         self.canvas_pareto = FigureCanvasTkAgg(self.fig_pareto, master=self.scrollable_frame)
         self.canvas_pareto.get_tk_widget().pack(fill="x", expand=True, padx=10, pady=10)
@@ -317,92 +296,46 @@ class EnergySummaryView(ttk.Frame):
         try:
             rows, grand_total = self.controller.get_monthly_projection()
             if not rows: return
-
-            # Preparar datos
             labels = [r['device'] for r in rows]
             values_kwh = [r['kwh_month'] for r in rows]
             values_rel = [r['rel_energy'] for r in rows]
             values_acc_rel = [r['acc_rel'] for r in rows]
 
-            # ==========================================
-            # 1. GRÁFICA TORTA (PIE) CON LEYENDA LATERAL
-            # ==========================================
+            # TORTA
             self.ax_pie.clear()
-            
-            # Dibujamos la torta SIN etiquetas directas (labels=None) para limpieza
             wedges, texts, autotexts = self.ax_pie.pie(
-                values_rel, 
-                labels=None, # Quitamos etiquetas del gráfico
-                autopct='%1.1f%%', 
-                startangle=90, 
-                pctdistance=0.85,
-                textprops={'fontsize': 8}
+                values_rel, labels=None, autopct='%1.1f%%', startangle=90, pctdistance=0.85, textprops={'fontsize': 8}
             )
-            
             self.ax_pie.set_title("Distribución de Energía (%)")
-
-            # Crear etiquetas personalizadas para la leyenda: "Nombre (XX.X%)"
             legend_labels = [f"{l} ({v:.1f}%)" for l, v in zip(labels, values_rel)]
-            
-            # Colocar la leyenda a la derecha (fuera de la torta)
-            self.ax_pie.legend(
-                wedges, 
-                legend_labels,
-                title="Dispositivos",
-                loc="center left",
-                bbox_to_anchor=(1, 0, 0.5, 1), # Mover a la derecha
-                fontsize='small'
-            )
-            
-            # Ajuste para que la leyenda quepa en el canvas
+            self.ax_pie.legend(wedges, legend_labels, title="Dispositivos", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1), fontsize='small')
             self.fig_pie.tight_layout()
             self.canvas_pie.draw()
 
-            # ==========================================
-            # 2. GRÁFICA PARETO (ARREGLO DE CORTES)
-            # ==========================================
+            # PARETO
             self.ax_pareto.clear()
-            
-            if hasattr(self, 'ax2'): 
-                self.ax_pareto.figure.delaxes(self.ax2)
-            
+            if hasattr(self, 'ax2'): self.ax_pareto.figure.delaxes(self.ax2)
             self.ax2 = self.ax_pareto.twinx()
-            
             x_pos = range(len(labels))
-            
-            # Barras
             self.ax_pareto.bar(x_pos, values_kwh, color='skyblue', label='Consumo (kWh)', align='center')
-            
-            # Línea (Punto rojo)
             self.ax2.plot(x_pos, values_acc_rel, color='red', marker='o', markersize=5, linewidth=2, label='% Acumulado', zorder=10)
             
-            # Sincronización de Ejes (Para que el punto toque la barra)
             self.ax_pareto.set_ylim(0, grand_total * 1.1)
             self.ax2.set_ylim(0, 110)
             
-            # Etiquetas del Eje X
             self.ax_pareto.set_xticks(x_pos)
             self.ax_pareto.set_xticklabels(labels, rotation=45, ha='right', fontsize=9)
-            
             self.ax_pareto.set_ylabel("Energía (kWh/mes)")
             self.ax2.set_ylabel("Porcentaje Acumulado (%)")
-            
             self.ax2.axhline(y=80, color='green', linestyle='--', alpha=0.5, linewidth=1)
-
+            
             lines_1, labels_1 = self.ax_pareto.get_legend_handles_labels()
             lines_2, labels_2 = self.ax2.get_legend_handles_labels()
             self.ax_pareto.legend(lines_1 + lines_2, labels_1 + labels_2, loc='center right', fontsize='small')
-
             self.ax_pareto.set_title("Diagrama de Pareto")
-
-            # --- SOLUCIÓN AL CORTE DE TEXTO ---
-            # Aumentamos el margen inferior manualmente para dar espacio a las letras rotadas
-            self.fig_pareto.subplots_adjust(bottom=0.25, right=0.9) 
-            
+            self.fig_pareto.subplots_adjust(bottom=0.25, right=0.9)
             self.canvas_pareto.draw()
-
-        except Exception as e:
-            print(f"Error charts: {e}")
+        except Exception as e: print(f"Error charts: {e}")
 
     def refresh_bill_data(self):
         if not self.controller: return
@@ -416,11 +349,15 @@ class EnergySummaryView(ttk.Frame):
         try:
             calc = float(self.var_calculated_total.get())
             bill = float(self.ent_bill_input.get())
-            diff = calc - bill
+            
+            # CAMBIO: Valor absoluto en la diferencia también
+            diff = abs(calc - bill)
             perc = (diff / bill * 100) if bill > 0 else 0.0
-            self.lbl_diff_kwh.config(text=f"Diferencia: {diff:+.2f} kWh")
-            self.lbl_diff_perc.config(text=f"Desviación: {perc:+.2f} %")
-            if abs(perc) <= 10: self.lbl_verdict.config(text="✅ La simulación es PRECISA (<10%)", foreground="green")
-            elif abs(perc) <= 20: self.lbl_verdict.config(text="⚠️ La simulación es ACEPTABLE (<20%)", foreground="orange")
+            
+            self.lbl_diff_kwh.config(text=f"Diferencia: {diff:.2f} kWh") # Sin signo
+            self.lbl_diff_perc.config(text=f"Desviación: {perc:.2f} %")
+            
+            if perc <= 10: self.lbl_verdict.config(text="✅ La simulación es PRECISA (<10%)", foreground="green")
+            elif perc <= 20: self.lbl_verdict.config(text="⚠️ La simulación es ACEPTABLE (<20%)", foreground="orange")
             else: self.lbl_verdict.config(text="❌ Alta Desviación: Revise parámetros", foreground="red")
         except ValueError: self.lbl_verdict.config(text="Ingrese un número válido", foreground="red")

@@ -1,5 +1,7 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog # <--- AGREGADO simpledialog
+from tkinter import ttk, filedialog, messagebox, simpledialog
+import sys  # <--- NUEVO IMPORT
+import matplotlib.pyplot as plt # <--- NUEVO IMPORT (Para cerrar gráficas pendientes)
 from controllers.csv_controller import CSVController
 from ui.dropdown_view import DropdownView
 from ui.table_view import TableView
@@ -20,6 +22,10 @@ class MainWindow:
         self.window = tk.Tk()
         self.window.title("CSV Analyzer Pro - Simulación Semanal")
         self.window.geometry("1400x950")
+
+        # --- CRÍTICO: VINCULAR EL CIERRE DE VENTANA ---
+        self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # ----------------------------------------------
 
         self.main_notebook = ttk.Notebook(self.window)
         self.main_notebook.pack(fill="both", expand=True, padx=10, pady=(5, 0))
@@ -46,6 +52,24 @@ class MainWindow:
         self.tab_analisis_energia = ttk.Frame(self.main_notebook)
         self.main_notebook.add(self.tab_analisis_energia, text="🔋 Análisis de Energía")
         self._setup_analisis_energia_view()
+
+    # ========================================================
+    #  MÉTODO DE CIERRE FORZADO (NUEVO)
+    # ========================================================
+    def on_closing(self):
+        """Mata todos los procesos al cerrar la ventana"""
+        if messagebox.askokcancel("Salir", "¿Seguro que quieres salir?"):
+            try:
+                # 1. Cerrar gráficas de matplotlib pendientes en memoria
+                plt.close('all')
+                
+                # 2. Destruir ventana de Tkinter
+                self.window.destroy()
+                
+                # 3. Forzar salida del sistema (Mata el proceso .exe)
+                sys.exit(0)
+            except:
+                sys.exit(0) # Salida forzosa si algo falla
 
     def run_task(self, description, func):
         self.window.config(cursor="watch")
@@ -172,54 +196,41 @@ class MainWindow:
     def _setup_analisis_energia_view(self):
         container = ttk.Frame(self.tab_analisis_energia)
         container.pack(fill="both", expand=True)
-        
         toolbar = ttk.Frame(container, relief=tk.RAISED, borderwidth=1)
         toolbar.pack(fill="x", side="top", padx=5, pady=5)
-        
-        # BOTÓN EXPORTAR
         btn_export = ttk.Button(toolbar, text="💾 Exportar Reporte Excel", command=self.export_excel)
         btn_export.pack(side="right", padx=10, pady=5)
-        
         self.view_energia = EnergySummaryView(container, controller=self.controller)
         self.view_energia.pack(fill="both", expand=True, padx=10, pady=10)
 
-    # --- EXPORTACIÓN ACTUALIZADA ---
     def export_excel(self):
-        # 1. Pedir Código de la Casa
-        house_code = simpledialog.askstring("Exportar Reporte", "Ingrese el Código de la Casa:")
+        house_code = simpledialog.askstring("Exportar", "Ingrese el Código de la Casa:")
+        if house_code is None: return
+        safe_name = "".join(c for c in house_code if c.isalnum() or c in (' ', '-', '_')).strip() or "Reporte"
         
-        # Si cancela o lo deja vacío, salimos o usamos default
-        if house_code is None: return # Cancelado
-        if not house_code.strip(): house_code = "Reporte_Energia"
-        
-        # Limpiar caracteres raros del nombre
-        safe_name = "".join(c for c in house_code if c.isalnum() or c in (' ', '-', '_')).strip()
-        default_filename = f"{safe_name}.xlsx"
-        
-        # 2. Abrir diálogo de guardado con el nombre pre-llenado
-        path = filedialog.asksaveasfilename(
-            initialfile=default_filename, # <--- Aquí está la magia
-            defaultextension=".xlsx",
-            filetypes=[("Excel Files", "*.xlsx")],
-            title="Guardar Reporte de Energía"
-        )
-        
+        path = filedialog.asksaveasfilename(initialfile=f"{safe_name}.xlsx", defaultextension=".xlsx", filetypes=[("Excel","*.xlsx")])
         if not path: return
         
-        # Recolectar Figuras de la vista de Energía
-        figures = {}
+        # Recoger Gráficas
+        figs = {}
         if hasattr(self, 'view_energia'):
-            if hasattr(self.view_energia, 'fig_pie'):
-                figures['Diagrama Torta'] = self.view_energia.fig_pie
-            if hasattr(self.view_energia, 'fig_pareto'):
-                figures['Diagrama Pareto'] = self.view_energia.fig_pareto
+            if hasattr(self.view_energia, 'fig_pie'): figs['Distribución'] = self.view_energia.fig_pie
+            if hasattr(self.view_energia, 'fig_pareto'): figs['Pareto'] = self.view_energia.fig_pareto
+            
+        # RECOGER VALOR FACTURA (NUEVO)
+        bill_val = 0.0
+        try:
+            if hasattr(self, 'view_energia') and hasattr(self.view_energia, 'ent_bill_input'):
+                v = self.view_energia.ent_bill_input.get()
+                if v: bill_val = float(v)
+        except: pass
 
         def _do_export():
-            self.controller.export_report(path, figures)
+            # Pasamos el valor de la factura
+            self.controller.export_report(path, figs, bill_val)
             
         self.run_task(f"Generando {safe_name}...", _do_export)
 
-    # --- LÓGICA DE CARGA ---
     def load_csv_generic(self, k, d, t):
         self.controller.load_csv(filedialog.askopenfilename(filetypes=[("CSV", "*.csv")]), k)
         devs = self.controller.get_devices(k)
@@ -258,7 +269,6 @@ class MainWindow:
         table_widget.update_table_multi(columns=cols, rows=rows)
         if self.controller.last_warning: messagebox.showwarning("Aviso", self.controller.last_warning)
 
-    # --- CICLOS ---
     def _on_ciclos_device_select(self, dev):
         if not dev: return
         cfg = self.controller.get_device_config('ciclos', dev)
@@ -296,7 +306,6 @@ class MainWindow:
         self.show_table_dual('ciclos', dev, self.table_ciclos)
         self._refresh_analytics('ciclos')
 
-    # --- ESCALONES ---
     def _on_escalones_device_select(self, dev):
         if not dev: return
         cfg = self.controller.get_device_config('escalones', dev)

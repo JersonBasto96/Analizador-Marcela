@@ -2,6 +2,10 @@ from services.csv_service import CSVService, CSVServiceError
 from models.csv_model import CSVData
 from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime, timedelta, time
+import pandas as pd
+import openpyxl
+from openpyxl.drawing.image import Image as ExcelImage
+import io
 
 class CSVContext:
     def __init__(self):
@@ -12,7 +16,7 @@ class CSVContext:
 
 class CSVController:
     def __init__(self):
-        print("--- CONTROLADOR V10: PARETO + WRAP AROUND ---")
+        print("--- CONTROLADOR V14: FIX EXPORT ---")
         self.contexts: Dict[str, CSVContext] = {
             'hora_exacta': CSVContext(),
             'general': CSVContext(),
@@ -23,54 +27,50 @@ class CSVController:
         self.VOLTAGE = 120.0 
 
     # =========================================================================
-    #  MÉTODO DE PROYECCIÓN MENSUAL (PARETO ABC - CORREGIDO)
+    #  MÉTODOS DE CÁLCULO
     # =========================================================================
     def get_monthly_projection(self) -> Tuple[List[Dict], float]:
-        """
-        Genera Tabla de Análisis de Energía (Pareto):
-        Dispositivo | kWh/mes | % Relativo | kWh Acumulado | % Acumulado
-        """
-        # 1. Obtener datos base (semanales)
-        rows, _ = self.get_energy_summary()
-        
-        # 2. Calcular Totales Mensuales
-        temp_list = []
+        rows, totals = self.get_energy_summary()
+        monthly_rows = []
         grand_total_month = 0.0
+        
+        # Agrupar y calcular
+        temp_list = []
+        luminarias_total = 0.0
+        found_luminarias = False
         
         for r in rows:
             month_kwh = r['total_week'] * 4
             grand_total_month += month_kwh
-            temp_list.append({
-                'device': r['device'],
-                'kwh_month': month_kwh # <--- ESTA ES LA CLAVE QUE FALTABA
-            })
+            name = r['device']
             
-        # 3. ORDENAR por consumo descendente (Mayor a menor)
+            if "luminaria" in name.lower() or "iluminacion" in name.lower() or "iluminación" in name.lower():
+                luminarias_total += month_kwh
+                found_luminarias = True
+            else:
+                temp_list.append({'device': name, 'kwh_month': month_kwh})
+        
+        if found_luminarias:
+            temp_list.append({'device': 'Iluminación (Agrupada)', 'kwh_month': luminarias_total})
+            
         temp_list.sort(key=lambda x: x['kwh_month'], reverse=True)
         
-        # 4. Calcular Métricas Relativas y Acumuladas
         final_rows = []
         accumulated_kwh = 0.0
         
         for item in temp_list:
             kwh = item['kwh_month']
             accumulated_kwh += kwh
-            
-            if grand_total_month > 0:
-                rel_energy = (kwh / grand_total_month) * 100
-                rel_accum = (accumulated_kwh / grand_total_month) * 100
-            else:
-                rel_energy = 0.0
-                rel_accum = 0.0
+            rel_energy = (kwh / grand_total_month * 100) if grand_total_month > 0 else 0.0
+            acc_rel = (accumulated_kwh / grand_total_month * 100) if grand_total_month > 0 else 0.0
             
             final_rows.append({
                 'device': item['device'],
                 'kwh_month': round(kwh, 4),
                 'rel_energy': round(rel_energy, 2),
                 'acc_kwh': round(accumulated_kwh, 4),
-                'acc_rel': round(rel_accum, 2)
+                'acc_rel': round(acc_rel, 2)
             })
-            
         return final_rows, round(grand_total_month, 4)
 
     def get_energy_summary(self) -> Tuple[List[Dict], Dict]:
@@ -193,7 +193,7 @@ class CSVController:
 
     def _parse_date(self, date_str: str) -> Optional[datetime]:
         if not date_str: return None
-        formats = ["%d/%m/%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%m/%d/%Y %H:%M", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
+        formats = ["%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
         for fmt in formats:
             try: return datetime.strptime(date_str.strip(), fmt)
             except ValueError: continue
@@ -388,88 +388,25 @@ class CSVController:
         return tm, tot
 
     # --- HELPERS INTERNOS ---
-    
-    def _apply_multi_cycle_day(self, raw_data, start_times_str):
-        """WRAP-AROUND + RELLENO 0 (CORREGIDO)"""
-        if not raw_data: return []
-        
-        # Parsear tiempos
-        target_times = []
-        for t in start_times_str:
-            try:
-                try: tt = datetime.strptime(t, "%H:%M").time()
-                except: tt = datetime.strptime(t, "%H:%M:%S").time()
-                target_times.append(tt)
-            except: continue
-        
-        base = raw_data[0][0].date()
-        day_s = datetime.combine(base, time(0,0))
-        day_e = day_s + timedelta(hours=24)
-        
-        # Caso 0 usos: Retornar todo ceros
-        if not target_times:
-            zeros = []
-            curr = day_s
-            while curr < day_e:
-                zeros.append((curr, curr.strftime("%d/%m/%Y %H:%M:%S"), "0"))
-                curr += timedelta(minutes=1)
-            return zeros
-
-        target_times.sort()
-        cycle_dur = raw_data[-1][0] - raw_data[0][0]
-        orig_first = raw_data[0][0]
-        
-        # Identificar intervalos activos
-        active_ranges = []
-        for t in target_times:
-            start = datetime.combine(base, t)
-            end = start + cycle_dur
-            if end > day_e:
-                active_ranges.append((start, day_e))
-                active_ranges.append((day_s, day_s + (end - day_e)))
-            else:
-                active_ranges.append((start, end))
-
-        final_rows = []
-        # Fondo ceros
-        curr = day_s
-        while curr < day_e:
-            is_active = False
-            for s, e in active_ranges:
-                if s <= curr <= e:
-                    is_active = True
-                    break
-            if not is_active:
-                final_rows.append((curr, curr.strftime("%d/%m/%Y %H:%M:%S"), "0"))
-            curr += timedelta(minutes=1)
-
-        # Datos reales
-        for t in target_times:
-            cycle_start = datetime.combine(base, t)
-            offset = cycle_start - orig_first
-            for dt, _, val in raw_data:
-                new_dt = dt + offset
-                while new_dt >= day_e: new_dt -= timedelta(hours=24)
-                while new_dt < day_s: new_dt += timedelta(hours=24)
-                final_rows.append((new_dt, new_dt.strftime("%d/%m/%Y %H:%M:%S"), val))
-        
-        final_rows.sort(key=lambda x: x[0])
-        return final_rows
+    def get_power_profile_1min(self, k, d): return self.get_typical_day_profile(k, d, 'weekday')
+    def get_total_power_vector(self): return self.get_total_typical_profile('weekday')
+    def get_energy_profile(self, k, d):
+        t, p = self.get_typical_day_profile(k, d, 'weekday')
+        e, acc = [], 0
+        for v in p:
+            acc += v*(1.0/60000.0)
+            e.append(acc)
+        return t, e
+    def get_total_energy_vector(self): return self.get_total_typical_profile('weekday', True)
 
     def _generate_step_profile(self, nominal_val_str, base_date, start_times, end_times):
         timeline = []
         current = datetime.combine(base_date, time(0,0))
         end_of_day = current + timedelta(hours=24)
-        
-        # Base 0
         while current < end_of_day:
             timeline.append({'dt': current, 'str': current.strftime("%d/%m/%Y %H:%M:%S"), 'val': "0"})
             current += timedelta(minutes=1)
-        
-        # Caso 0 intervalos
-        if not start_times:
-            return [(t['dt'], t['str'], t['val']) for t in timeline]
-            
+        if not start_times: return [(t['dt'], t['str'], t['val']) for t in timeline]
         for i in range(len(start_times)):
             if i >= len(end_times): break
             try:
@@ -480,14 +417,64 @@ class CSVController:
                 if dt_e < dt_s:
                     dt_end_day = datetime.combine(base_date, time(23,59,59))
                     dt_start_day = datetime.combine(base_date, time(0,0))
-                    for point in timeline:
-                        if dt_s <= point['dt'] <= dt_end_day: point['val'] = nominal_val_str
-                        if dt_start_day <= point['dt'] < dt_e: point['val'] = nominal_val_str
+                    for p in timeline:
+                        if dt_s <= p['dt'] <= dt_end_day: p['val'] = nominal_val_str
+                        if dt_start_day <= p['dt'] < dt_e: p['val'] = nominal_val_str
                 else:
-                    for point in timeline:
-                        if dt_s <= point['dt'] < dt_e: point['val'] = nominal_val_str
+                    for p in timeline:
+                        if dt_s <= p['dt'] < dt_e: p['val'] = nominal_val_str
             except: continue
         return [(t['dt'], t['str'], t['val']) for t in timeline]
+
+    def _apply_multi_cycle_day(self, raw_data, start_times_str):
+        if not raw_data: return []
+        target_times = []
+        for t in start_times_str:
+            try:
+                try: tt = datetime.strptime(t, "%H:%M").time()
+                except: tt = datetime.strptime(t, "%H:%M:%S").time()
+                target_times.append(tt)
+            except: continue
+        base = raw_data[0][0].date()
+        day_s = datetime.combine(base, time(0,0))
+        day_e = day_s + timedelta(hours=24)
+        if not target_times:
+            zeros = []
+            curr = day_s
+            while curr < day_e:
+                zeros.append((curr, curr.strftime("%d/%m/%Y %H:%M:%S"), "0"))
+                curr += timedelta(minutes=1)
+            return zeros
+        target_times.sort()
+        cycle_dur = raw_data[-1][0] - raw_data[0][0]
+        orig_first = raw_data[0][0]
+        active_ranges = []
+        for t in target_times:
+            start = datetime.combine(base, t)
+            end = start + cycle_dur
+            if end > day_e:
+                active_ranges.append((start, day_e))
+                active_ranges.append((day_s, day_s + (end - day_e)))
+            else:
+                active_ranges.append((start, end))
+        final_rows = []
+        curr = day_s
+        while curr < day_e:
+            is_active = False
+            for s, e in active_ranges:
+                if s <= curr <= e: is_active = True; break
+            if not is_active: final_rows.append((curr, curr.strftime("%d/%m/%Y %H:%M:%S"), "0"))
+            curr += timedelta(minutes=1)
+        for t in target_times:
+            cycle_start = datetime.combine(base, t)
+            offset = cycle_start - orig_first
+            for dt, _, val in raw_data:
+                new_dt = dt + offset
+                while new_dt >= day_e: new_dt -= timedelta(hours=24)
+                while new_dt < day_s: new_dt += timedelta(hours=24)
+                final_rows.append((new_dt, new_dt.strftime("%d/%m/%Y %H:%M:%S"), val))
+        final_rows.sort(key=lambda x: x[0])
+        return final_rows
 
     def _process_nevera_logic(self, sorted_data):
         if not sorted_data: return []
@@ -506,22 +493,48 @@ class CSVController:
 
     def get_device_statistics(self, context_key: str, device_name: str) -> Dict:
         return {}
-
     def get_all_statistics(self, context_key: str) -> Dict:
         return {}
     
     # ========================================================
-    #  EXPORTACIÓN
+    #  EXPORTACIÓN A EXCEL
     # ========================================================
-    def export_report(self, filename: str, figures: Dict[str, Any] = None):
+    def export_report(self, filename: str, figures: Dict[str, Any] = None, bill_real: float = 0.0):
         import pandas as pd
         import openpyxl
         from openpyxl.drawing.image import Image as ExcelImage
         import io
         
+        # 1. DATOS MINUTO A MINUTO (L-V y S-D)
+        base_date = datetime.now().date()
+        time_axis = [datetime.combine(base_date, time(0,0)) + timedelta(minutes=i) for i in range(1440)]
+        str_time = [t.strftime("%H:%M") for t in time_axis]
+        
+        data_lv = {"Hora": str_time}
+        data_sd = {"Hora": str_time}
+        total_lv = [0.0] * 1440
+        total_sd = [0.0] * 1440
+        
+        for ctx in ['hora_exacta', 'ciclos', 'escalones']:
+            for dev in self.get_devices(ctx):
+                _, p_wd = self.get_typical_day_profile(ctx, dev, 'weekday')
+                _, p_we = self.get_typical_day_profile(ctx, dev, 'weekend')
+                col = f"{dev} ({ctx}) [W]"
+                data_lv[col] = p_wd
+                data_sd[col] = p_we
+                for i in range(1440):
+                    total_lv[i] += p_wd[i]
+                    total_sd[i] += p_we[i]
+        
+        data_lv["TOTAL [W]"] = total_lv
+        data_sd["TOTAL [W]"] = total_sd
+        df_lv = pd.DataFrame(data_lv)
+        df_sd = pd.DataFrame(data_sd)
+
+        # 2. RESUMEN SEMANAL
         rows_data, totals = self.get_energy_summary()
-        df_summary = pd.DataFrame(rows_data)
-        df_summary = df_summary.rename(columns={
+        df_weekly = pd.DataFrame(rows_data)
+        df_weekly = df_weekly.rename(columns={
             'section': 'Sección', 'device': 'Dispositivo',
             'daily_wd': 'Día Laboral (kWh)', 'daily_we': 'Fin de Semana (kWh)',
             'total_5d': 'Total L-V (kWh)', 'total_2d': 'Total S-D (kWh)',
@@ -529,62 +542,84 @@ class CSVController:
         })
         total_row = {
             'Sección': '', 'Dispositivo': 'TOTAL GENERAL',
-            'daily_wd': totals['daily_wd'], 'daily_we': totals['daily_we'],
-            'total_5d': totals['total_5d'], 'total_2d': totals['total_2d'],
-            'total_week': totals['total_week']
-        }
-        # Mapeo manual para evitar errores de concat
-        mapped_row = {
-            'Sección': '', 'Dispositivo': 'TOTAL GENERAL',
             'Día Laboral (kWh)': totals['daily_wd'], 'Fin de Semana (kWh)': totals['daily_we'],
             'Total L-V (kWh)': totals['total_5d'], 'Total S-D (kWh)': totals['total_2d'],
             'Total Semanal (kWh)': totals['total_week']
         }
-        df_summary = pd.concat([df_summary, pd.DataFrame([mapped_row])], ignore_index=True)
+        # Mapeo manual para evitar errores
+        map_row = {
+            'Sección': total_row['Sección'], 'Dispositivo': total_row['Dispositivo'],
+            'Día Laboral (kWh)': total_row['Día Laboral (kWh)'], 
+            'Fin de Semana (kWh)': total_row['Fin de Semana (kWh)'],
+            'Total L-V (kWh)': total_row['Total L-V (kWh)'], 
+            'Total S-D (kWh)': total_row['Total S-D (kWh)'],
+            'Total Semanal (kWh)': total_row['Total Semanal (kWh)']
+        }
+        df_weekly = pd.concat([df_weekly, pd.DataFrame([map_row])], ignore_index=True)
 
-        monthly_rows, monthly_total = self.get_monthly_projection()
-        df_monthly = pd.DataFrame(monthly_rows)
+        # 3. PROYECCIÓN MENSUAL
+        rows_monthly, total_monthly = self.get_monthly_projection()
+        df_monthly = pd.DataFrame(rows_monthly)
         df_monthly = df_monthly.rename(columns={
             'device': 'Dispositivo', 'kwh_month': 'Energía (kWh/mes)',
             'rel_energy': '% Relativo', 'acc_kwh': 'Acumulado (kWh)',
             'acc_rel': '% Acumulado'
         })
+        cols_keep = ['Dispositivo', 'Energía (kWh/mes)', '% Relativo', 'Acumulado (kWh)', '% Acumulado']
+        if all(c in df_monthly.columns for c in cols_keep): df_monthly = df_monthly[cols_keep]
         
-        time_axis, _ = self.get_total_weekly_vector()
-        detail_data = {"Fecha / Hora": [t.strftime("%a %H:%M") for t in time_axis]}
-        
-        for ctx in ['hora_exacta', 'ciclos', 'escalones']:
-            for dev in self.get_devices(ctx):
-                _, p_vec = self.get_weekly_power_vector(ctx, dev)
-                col_name = f"{dev} ({ctx}) [W]"
-                if len(p_vec) == len(time_axis): detail_data[col_name] = p_vec
-        
-        _, total_vec = self.get_total_weekly_vector(is_energy=False)
-        detail_data["TOTAL VIVIENDA [W]"] = total_vec
-        df_detail = pd.DataFrame(detail_data)
+        row_tot_month = {
+            'Dispositivo': 'TOTAL GENERAL',
+            'Energía (kWh/mes)': total_monthly,
+            '% Relativo': '100%', 'Acumulado (kWh)': total_monthly, '% Acumulado': '100%'
+        }
+        df_monthly = pd.concat([df_monthly, pd.DataFrame([row_tot_month])], ignore_index=True)
+
+        # 4. FACTURA
+        diff = abs(total_monthly - bill_real)
+        perc = (diff / bill_real * 100) if bill_real > 0 else 0.0
+        status = "✅ Preciso" if perc <= 10 else ("⚠️ Aceptable" if perc <= 20 else "❌ Revisar")
+        df_bill = pd.DataFrame({
+            "Concepto": ["Energía Calculada (Mes)", "Energía Factura (Real)", "Diferencia (Absoluta)", "Desviación (%)", "Estado"],
+            "Valor": [total_monthly, bill_real, diff, f"{perc:.2f}", status],
+            "Unidad": ["kWh", "kWh", "kWh", "%", "-"]
+        })
 
         try:
             with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-                df_summary.to_excel(writer, sheet_name='Resumen Semanal', index=False)
+                # Escribir en el orden pedido
+                df_lv.to_excel(writer, sheet_name='L-V Potencia', index=False)
+                df_sd.to_excel(writer, sheet_name='S-D Potencia', index=False)
+                df_weekly.to_excel(writer, sheet_name='Resumen Semanal', index=False)
                 df_monthly.to_excel(writer, sheet_name='Proyección Mensual', index=False)
-                df_detail.to_excel(writer, sheet_name='Detalle Minutal', index=False)
-                wb = writer.book
-                ws_charts = wb.create_sheet("Gráficas")
+                df_bill.to_excel(writer, sheet_name='Comparativa de factura', index=False)
+                
+                for sheet_name in writer.sheets:
+                    sheet = writer.sheets[sheet_name]
+                    for column in sheet.columns:
+                        max_length = 0
+                        column = [cell for cell in column]
+                        for cell in column:
+                            try:
+                                if len(str(cell.value)) > max_length: max_length = len(str(cell.value))
+                            except: pass
+                        adjusted_width = (max_length + 2)
+                        sheet.column_dimensions[column[0].column_letter].width = adjusted_width
 
             if figures:
                 wb = openpyxl.load_workbook(filename)
-                ws = wb["Gráficas"]
-                row_idx = 1
+                ws = wb['Proyección Mensual']
+                row_idx = len(df_monthly) + 4 
                 for name, fig in figures.items():
                     if fig:
-                        img_buffer = io.BytesIO()
-                        fig.savefig(img_buffer, format='png', dpi=100)
-                        img_buffer.seek(0)
-                        img = ExcelImage(img_buffer)
-                        img.anchor = f'A{row_idx}'
+                        buf = io.BytesIO()
+                        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                        buf.seek(0)
+                        img = ExcelImage(buf)
+                        img.anchor = f'B{row_idx}'
                         ws.add_image(img)
-                        ws[f'A{row_idx}'].value = name
+                        ws[f'B{row_idx-1}'] = name
+                        ws[f'B{row_idx-1}'].font = openpyxl.styles.Font(bold=True)
                         row_idx += 25
                 wb.save(filename)
-
         except Exception as e: raise CSVServiceError(f"Error escribiendo Excel: {e}")
