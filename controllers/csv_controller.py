@@ -6,6 +6,7 @@ import pandas as pd
 import openpyxl
 from openpyxl.drawing.image import Image as ExcelImage
 import io
+import re # Necesario para leer "Aire 1 120"
 
 class CSVContext:
     def __init__(self):
@@ -13,10 +14,12 @@ class CSVContext:
         self.device_columns: Dict = {}
         self.analysis_cache: Dict = {}
         self.device_configs: Dict[str, Dict[str, Any]] = {}
+        # Metadatos para voltaje y cantidad
+        self.device_meta: Dict[str, Dict[str, Any]] = {}
 
 class CSVController:
     def __init__(self):
-        print("--- CONTROLADOR V14: FIX EXPORT ---")
+        print("--- CONTROLADOR V17: AIRES + EXPORTACIÓN 5 HOJAS ---")
         self.contexts: Dict[str, CSVContext] = {
             'hora_exacta': CSVContext(),
             'general': CSVContext(),
@@ -34,7 +37,7 @@ class CSVController:
         monthly_rows = []
         grand_total_month = 0.0
         
-        # Agrupar y calcular
+        # Agrupar Luminarias
         temp_list = []
         luminarias_total = 0.0
         found_luminarias = False
@@ -53,6 +56,7 @@ class CSVController:
         if found_luminarias:
             temp_list.append({'device': 'Iluminación (Agrupada)', 'kwh_month': luminarias_total})
             
+        # Ordenar Pareto
         temp_list.sort(key=lambda x: x['kwh_month'], reverse=True)
         
         final_rows = []
@@ -61,6 +65,7 @@ class CSVController:
         for item in temp_list:
             kwh = item['kwh_month']
             accumulated_kwh += kwh
+            
             rel_energy = (kwh / grand_total_month * 100) if grand_total_month > 0 else 0.0
             acc_rel = (accumulated_kwh / grand_total_month * 100) if grand_total_month > 0 else 0.0
             
@@ -136,6 +141,7 @@ class CSVController:
             ctx.data = CSVService.read_csv(path)
             ctx.analysis_cache.clear()
             ctx.device_configs.clear()
+            ctx.device_meta.clear() # Limpiar metadatos antiguos
         except CSVServiceError: raise
         except Exception as e: raise CSVServiceError(f"Error inesperado al leer CSV: {e}")
 
@@ -151,41 +157,76 @@ class CSVController:
         cols = [col.strip() for col in ctx.data.columns]
         i = 0
         pairs_found = False
+        
+        # Lógica de Escalones (Simple)
+        if context_key == 'escalones':
+            has_dates = False
+            for col in cols:
+                if "fecha" in col.lower() or "hora" in col.lower(): has_dates = True; break
+            if not has_dates:
+                for col in cols:
+                    if not col: continue
+                    device_name = col.strip()
+                    original = device_name
+                    suffix = 1
+                    while device_name in ctx.device_columns:
+                        suffix += 1
+                        device_name = f"{original}_{suffix}"
+                    ctx.device_columns[device_name] = (None, col)
+                return
+
+        # Lógica Estándar (Hora Exacta / Ciclos)
         while i + 1 < len(cols):
             fecha_col = cols[i]
             value_col = cols[i + 1]
-            if "fecha" in fecha_col.lower() or "hora" in fecha_col.lower() or "time" in fecha_col.lower():
-                device_name = self._extract_device_name(fecha_col)
+            f_low = fecha_col.lower()
+            
+            if "fecha" in f_low or "hora" in f_low or "time" in f_low:
+                # --- EXTRACCIÓN DE METADATOS (CANTIDAD Y VOLTAJE) ---
+                raw_name = fecha_col
+                device_name, meta = self._extract_device_info(raw_name)
+                
                 if not device_name: device_name = value_col
                 device_name = device_name.strip()
+                
                 if device_name:
                     original = device_name
                     suffix = 1
                     while device_name in ctx.device_columns:
                         suffix += 1
                         device_name = f"{original}_{suffix}"
+                    
                     ctx.device_columns[device_name] = (fecha_col, value_col)
+                    if meta: ctx.device_meta[device_name] = meta
                     pairs_found = True
             i += 2
 
-        if context_key == 'escalones' and not pairs_found:
-            for col in cols:
-                if not col: continue
-                device_name = col.strip()
-                original = device_name
-                suffix = 1
-                while device_name in ctx.device_columns:
-                    suffix += 1
-                    device_name = f"{original}_{suffix}"
-                ctx.device_columns[device_name] = (None, col)
-
-    def _extract_device_name(self, date_column: str) -> str:
-        clean_name = date_column
+    def _extract_device_info(self, col_name: str) -> Tuple[str, Optional[Dict]]:
+        """
+        Extrae: Nombre, Cantidad, Voltaje.
+        Ej: 'Fecha Hora Aire acondicionado 1 120' -> 'Aire acondicionado', {qty:1, voltage:120}
+        """
+        clean_name = col_name
         patterns = ['fecha hora', 'fecha/hora', 'fechahora', 'fecha', 'hora', 'timestamp']
         for p in patterns: clean_name = clean_name.lower().replace(p, '')
-        clean_name = ' '.join(clean_name.split()).strip()
-        if clean_name and clean_name.islower(): clean_name = clean_name.title()
-        return clean_name if clean_name else ""
+        clean_name = clean_name.strip()
+        
+        # Regex: Busca Texto + Numero + Numero al final
+        # Ej: "Aire 2 220"
+        match = re.search(r'^(.*)\s+(\d+)\s+(\d+)$', clean_name)
+        
+        if match:
+            base_name = match.group(1).strip().title()
+            qty = int(match.group(2))
+            volts = float(match.group(3))
+            return base_name, {'quantity': qty, 'voltage': volts}
+        
+        return clean_name.title(), None
+
+    def _extract_device_name(self, date_column: str) -> str:
+        # Wrapper legacy por si acaso
+        n, _ = self._extract_device_info(date_column)
+        return n
 
     def get_devices(self, context_key: str):
         if context_key in self.contexts: return list(self.contexts[context_key].device_columns.keys())
@@ -288,16 +329,33 @@ class CSVController:
         else:
             return [(item[1], item[2]) for item in raw_data]
 
-    # --- VECTORES ---
+    # --- VECTORES DE POTENCIA (AQUÍ APLICAMOS LA LÓGICA AC) ---
     def get_daily_power_vector(self, context_key: str, device_name: str, starts=None, ends=None) -> List[float]:
         data_rows = self.get_values_for_device(context_key, device_name, starts, ends)
         if not data_rows: return [0.0] * 1440
         power_axis = [0.0] * 1440
+        
+        # Recuperar metadatos (Voltaje/Cantidad)
+        ctx = self.contexts.get(context_key)
+        meta = ctx.device_meta.get(device_name, {})
+        
+        # Determinar factor
+        conversion_factor = self.VOLTAGE
+        if context_key == 'escalones':
+            conversion_factor = 1.0
+        elif meta:
+            # LÓGICA ESPECIAL AIRES
+            q = meta.get('quantity', 1)
+            v = meta.get('voltage', 120.0)
+            conversion_factor = q * v
+
         try:
             first_dt = datetime.strptime(data_rows[0][0], "%d/%m/%Y %H:%M:%S")
             start_of_day = datetime.combine(first_dt.date(), time(0,0))
         except: start_of_day = datetime.combine(datetime.now().date(), time(0,0))
+        
         minute_buckets = {i: [] for i in range(1440)}
+        
         for t_str, v_str in data_rows:
             try:
                 dt = datetime.strptime(t_str, "%d/%m/%Y %H:%M:%S")
@@ -306,12 +364,12 @@ class CSVController:
                 val = float(v_str.replace(',', '.'))
                 minute_buckets[minute_idx].append(val)
             except: continue
+            
         for i in range(1440):
             values = minute_buckets[i]
             if values:
                 avg = sum(values) / len(values)
-                if context_key == 'escalones': power_axis[i] = avg
-                else: power_axis[i] = avg * self.VOLTAGE
+                power_axis[i] = avg * conversion_factor
         return power_axis
 
     def get_typical_day_profile(self, context_key: str, device_name: str, day_type: str) -> Tuple[List[datetime], List[float]]:
@@ -493,11 +551,12 @@ class CSVController:
 
     def get_device_statistics(self, context_key: str, device_name: str) -> Dict:
         return {}
+
     def get_all_statistics(self, context_key: str) -> Dict:
         return {}
     
     # ========================================================
-    #  EXPORTACIÓN A EXCEL
+    #  EXPORTACIÓN A EXCEL (VERSIÓN FINAL PULIDA)
     # ========================================================
     def export_report(self, filename: str, figures: Dict[str, Any] = None, bill_real: float = 0.0):
         import pandas as pd
@@ -505,7 +564,7 @@ class CSVController:
         from openpyxl.drawing.image import Image as ExcelImage
         import io
         
-        # 1. DATOS MINUTO A MINUTO (L-V y S-D)
+        # --- 1. HOJAS DE POTENCIA (LIMPIEZA DE NOMBRES) ---
         base_date = datetime.now().date()
         time_axis = [datetime.combine(base_date, time(0,0)) + timedelta(minutes=i) for i in range(1440)]
         str_time = [t.strftime("%H:%M") for t in time_axis]
@@ -519,9 +578,12 @@ class CSVController:
             for dev in self.get_devices(ctx):
                 _, p_wd = self.get_typical_day_profile(ctx, dev, 'weekday')
                 _, p_we = self.get_typical_day_profile(ctx, dev, 'weekend')
-                col = f"{dev} ({ctx}) [W]"
-                data_lv[col] = p_wd
-                data_sd[col] = p_we
+                
+                col_name = f"{dev} [W]" # Agregamos [W]
+                
+                data_lv[col_name] = p_wd
+                data_sd[col_name] = p_we
+                
                 for i in range(1440):
                     total_lv[i] += p_wd[i]
                     total_sd[i] += p_we[i]
@@ -531,66 +593,81 @@ class CSVController:
         df_lv = pd.DataFrame(data_lv)
         df_sd = pd.DataFrame(data_sd)
 
-        # 2. RESUMEN SEMANAL
+        # --- 2. ENERGÍA DE DISPOSITIVOS ---
         rows_data, totals = self.get_energy_summary()
         df_weekly = pd.DataFrame(rows_data)
+        
+        if 'section' in df_weekly.columns:
+            df_weekly = df_weekly.drop(columns=['section'])
+            
         df_weekly = df_weekly.rename(columns={
-            'section': 'Sección', 'device': 'Dispositivo',
+            'device': 'Dispositivo',
             'daily_wd': 'Día Laboral (kWh)', 'daily_we': 'Fin de Semana (kWh)',
             'total_5d': 'Total L-V (kWh)', 'total_2d': 'Total S-D (kWh)',
             'total_week': 'Total Semanal (kWh)'
         })
+        
         total_row = {
-            'Sección': '', 'Dispositivo': 'TOTAL GENERAL',
+            'Dispositivo': 'TOTAL GENERAL',
             'Día Laboral (kWh)': totals['daily_wd'], 'Fin de Semana (kWh)': totals['daily_we'],
             'Total L-V (kWh)': totals['total_5d'], 'Total S-D (kWh)': totals['total_2d'],
             'Total Semanal (kWh)': totals['total_week']
         }
-        # Mapeo manual para evitar errores
-        map_row = {
-            'Sección': total_row['Sección'], 'Dispositivo': total_row['Dispositivo'],
-            'Día Laboral (kWh)': total_row['Día Laboral (kWh)'], 
-            'Fin de Semana (kWh)': total_row['Fin de Semana (kWh)'],
-            'Total L-V (kWh)': total_row['Total L-V (kWh)'], 
-            'Total S-D (kWh)': total_row['Total S-D (kWh)'],
-            'Total Semanal (kWh)': total_row['Total Semanal (kWh)']
-        }
-        df_weekly = pd.concat([df_weekly, pd.DataFrame([map_row])], ignore_index=True)
+        df_weekly = pd.concat([df_weekly, pd.DataFrame([total_row])], ignore_index=True)
 
-        # 3. PROYECCIÓN MENSUAL
-        rows_monthly, total_monthly = self.get_monthly_projection()
-        df_monthly = pd.DataFrame(rows_monthly)
-        df_monthly = df_monthly.rename(columns={
-            'device': 'Dispositivo', 'kwh_month': 'Energía (kWh/mes)',
-            'rel_energy': '% Relativo', 'acc_kwh': 'Acumulado (kWh)',
-            'acc_rel': '% Acumulado'
-        })
-        cols_keep = ['Dispositivo', 'Energía (kWh/mes)', '% Relativo', 'Acumulado (kWh)', '% Acumulado']
-        if all(c in df_monthly.columns for c in cols_keep): df_monthly = df_monthly[cols_keep]
+        # --- 3. PROYECCIÓN MENSUAL (CON %) ---
+        monthly_rows, monthly_total = self.get_monthly_projection()
+        
+        processed_monthly = []
+        for r in monthly_rows:
+            processed_monthly.append({
+                'Dispositivo': r['device'],
+                'Energía (kWh/mes)': r['kwh_month'],
+                '% Relativo': f"{r['rel_energy']:.2f}%",
+                'Acumulado (kWh)': r['acc_kwh'],
+                '% Acumulado': f"{r['acc_rel']:.2f}%"
+            })
+            
+        df_monthly = pd.DataFrame(processed_monthly)
         
         row_tot_month = {
             'Dispositivo': 'TOTAL GENERAL',
-            'Energía (kWh/mes)': total_monthly,
-            '% Relativo': '100%', 'Acumulado (kWh)': total_monthly, '% Acumulado': '100%'
+            'Energía (kWh/mes)': monthly_total,
+            '% Relativo': '100.00%', 
+            'Acumulado (kWh)': monthly_total, 
+            '% Acumulado': '100.00%'
         }
         df_monthly = pd.concat([df_monthly, pd.DataFrame([row_tot_month])], ignore_index=True)
 
-        # 4. FACTURA
-        diff = abs(total_monthly - bill_real)
+        # --- 4. COMPARATIVA FACTURA (LIMPIA) ---
+        diff = abs(monthly_total - bill_real)
         perc = (diff / bill_real * 100) if bill_real > 0 else 0.0
-        status = "✅ Preciso" if perc <= 10 else ("⚠️ Aceptable" if perc <= 20 else "❌ Revisar")
+        
+        # Formateo con coma para porcentaje
+        perc_str = f"{perc:.2f}".replace('.', ',') + "%"
+
         df_bill = pd.DataFrame({
-            "Concepto": ["Energía Calculada (Mes)", "Energía Factura (Real)", "Diferencia (Absoluta)", "Desviación (%)", "Estado"],
-            "Valor": [total_monthly, bill_real, diff, f"{perc:.2f}", status],
-            "Unidad": ["kWh", "kWh", "kWh", "%", "-"]
+            "Concepto": ["Energía Calculada (Mes)", "Energía Factura (Real)", "Diferencia (Absoluta)", "Diferencia Relativa"],
+            "Valor": [monthly_total, bill_real, diff, perc_str],
+            "Unidad": ["kWh", "kWh", "kWh", "-"]
         })
+
+        # --- 5. DETALLE MINUTAL (CONSERVAR IGUAL) ---
+        time_axis, _ = self.get_total_weekly_vector()
+        detail_data = {"Fecha / Hora": [t.strftime("%a %H:%M") for t in time_axis]}
+        for ctx in ['hora_exacta', 'ciclos', 'escalones']:
+            for dev in self.get_devices(ctx):
+                _, p_vec = self.get_weekly_power_vector(ctx, dev)
+                if len(p_vec) == len(time_axis): detail_data[dev] = p_vec
+        _, total_vec = self.get_total_weekly_vector(is_energy=False)
+        detail_data["TOTAL VIVIENDA [W]"] = total_vec
+        df_detail = pd.DataFrame(detail_data)
 
         try:
             with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-                # Escribir en el orden pedido
                 df_lv.to_excel(writer, sheet_name='L-V Potencia', index=False)
                 df_sd.to_excel(writer, sheet_name='S-D Potencia', index=False)
-                df_weekly.to_excel(writer, sheet_name='Resumen Semanal', index=False)
+                df_weekly.to_excel(writer, sheet_name='Energía de dispositivos', index=False)
                 df_monthly.to_excel(writer, sheet_name='Proyección Mensual', index=False)
                 df_bill.to_excel(writer, sheet_name='Comparativa de factura', index=False)
                 
@@ -622,4 +699,5 @@ class CSVController:
                         ws[f'B{row_idx-1}'].font = openpyxl.styles.Font(bold=True)
                         row_idx += 25
                 wb.save(filename)
+
         except Exception as e: raise CSVServiceError(f"Error escribiendo Excel: {e}")
