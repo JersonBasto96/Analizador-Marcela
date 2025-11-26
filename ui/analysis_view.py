@@ -5,6 +5,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.dates as mdates
 from datetime import timedelta
 from ui.table_view import TableView
+import numpy as np # Importamos numpy por seguridad matemática
 
 # ========================================================
 #  CLASE 1: VISTA DE GRÁFICAS (POTENCIA)
@@ -159,7 +160,7 @@ class AnalysisView(ttk.Frame):
         finally: top.config(cursor="")
 
 # ========================================================
-#  CLASE 2: VISTA DE TABLAS (ENERGÍA) + FACTURA
+#  CLASE 2: VISTA DE TABLAS (ENERGÍA) + FACTURA + GRÁFICAS
 # ========================================================
 class EnergySummaryView(ttk.Frame):
     def __init__(self, parent, controller=None, *args, **kwargs):
@@ -296,19 +297,36 @@ class EnergySummaryView(ttk.Frame):
         try:
             rows, grand_total = self.controller.get_monthly_projection()
             if not rows: return
+
+            # PROTECCIÓN MATEMÁTICA MEJORADA
+            if grand_total < 0.0001:
+                # Limpiar y salir
+                self.ax_pie.clear(); self.ax_pie.text(0.5, 0.5, "Consumo 0 kWh", ha='center'); self.canvas_pie.draw()
+                self.ax_pareto.clear(); self.ax_pareto.text(0.5, 0.5, "Consumo 0 kWh", ha='center'); self.canvas_pareto.draw()
+                return
+
             labels = [r['device'] for r in rows]
             values_kwh = [r['kwh_month'] for r in rows]
-            values_rel = [r['rel_energy'] for r in rows]
+            # Normalización segura para evitar errores de redondeo en matplotlib
+            values_rel = [max(0, r['rel_energy']) for r in rows] 
             values_acc_rel = [r['acc_rel'] for r in rows]
 
             # TORTA
             self.ax_pie.clear()
-            wedges, texts, autotexts = self.ax_pie.pie(
-                values_rel, labels=None, autopct='%1.1f%%', startangle=90, pctdistance=0.85, textprops={'fontsize': 8}
+            # Desempaquetado seguro: pie siempre devuelve patches, texts y (opcional) autotexts
+            pie_res = self.ax_pie.pie(
+                values_rel, 
+                labels=None, 
+                autopct='%1.1f%%', 
+                startangle=90, 
+                pctdistance=0.85, 
+                textprops={'fontsize': 8}
             )
+            # No necesitamos usar pie_res para nada aquí, solo se dibuja
             self.ax_pie.set_title("Distribución de Energía (%)")
+            
             legend_labels = [f"{l} ({v:.1f}%)" for l, v in zip(labels, values_rel)]
-            self.ax_pie.legend(wedges, legend_labels, title="Dispositivos", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1), fontsize='small')
+            self.ax_pie.legend(pie_res[0], legend_labels, title="Dispositivos", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1), fontsize='small')
             self.fig_pie.tight_layout()
             self.canvas_pie.draw()
 
@@ -316,6 +334,7 @@ class EnergySummaryView(ttk.Frame):
             self.ax_pareto.clear()
             if hasattr(self, 'ax2'): self.ax_pareto.figure.delaxes(self.ax2)
             self.ax2 = self.ax_pareto.twinx()
+            
             x_pos = range(len(labels))
             self.ax_pareto.bar(x_pos, values_kwh, color='skyblue', label='Consumo (kWh)', align='center')
             self.ax2.plot(x_pos, values_acc_rel, color='red', marker='o', markersize=5, linewidth=2, label='% Acumulado', zorder=10)
@@ -349,14 +368,10 @@ class EnergySummaryView(ttk.Frame):
         try:
             calc = float(self.var_calculated_total.get())
             bill = float(self.ent_bill_input.get())
-            
-            # CAMBIO: Valor absoluto en la diferencia también
             diff = abs(calc - bill)
             perc = (diff / bill * 100) if bill > 0 else 0.0
-            
-            self.lbl_diff_kwh.config(text=f"Diferencia: {diff:.2f} kWh") # Sin signo
+            self.lbl_diff_kwh.config(text=f"Diferencia: {diff:.2f} kWh")
             self.lbl_diff_perc.config(text=f"Desviación: {perc:.2f} %")
-            
             if perc <= 10: self.lbl_verdict.config(text="✅ La simulación es PRECISA (<10%)", foreground="green")
             elif perc <= 20: self.lbl_verdict.config(text="⚠️ La simulación es ACEPTABLE (<20%)", foreground="orange")
             else: self.lbl_verdict.config(text="❌ Alta Desviación: Revise parámetros", foreground="red")
