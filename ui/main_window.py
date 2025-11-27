@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
-import sys  # <--- NUEVO IMPORT
-import matplotlib.pyplot as plt # <--- NUEVO IMPORT (Para cerrar gráficas pendientes)
+import sys
+import matplotlib.pyplot as plt
 from controllers.csv_controller import CSVController
 from ui.dropdown_view import DropdownView
 from ui.table_view import TableView
@@ -11,7 +11,7 @@ class MainWindow:
     def __init__(self):
         self.controller = CSVController()
         
-        # Referencias a inputs dinámicos
+        # Referencias inputs
         self.entries_ciclos_wd_starts = []
         self.entries_ciclos_we_starts = []
         self.entries_escalones_wd_starts = []
@@ -22,21 +22,29 @@ class MainWindow:
         self.window = tk.Tk()
         self.window.title("CSV Analyzer Pro - Simulación Semanal")
         self.window.geometry("1400x950")
-
-        # --- CRÍTICO: VINCULAR EL CIERRE DE VENTANA ---
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
-        # ----------------------------------------------
 
+        # --- BARRA DE HERRAMIENTAS SUPERIOR (NUEVO) ---
+        self.project_toolbar = ttk.Frame(self.window, relief=tk.RAISED, borderwidth=1)
+        self.project_toolbar.pack(side="top", fill="x")
+        
+        ttk.Button(self.project_toolbar, text="💾 Guardar Proyecto", command=self.save_project_action).pack(side="left", padx=5, pady=5)
+        ttk.Button(self.project_toolbar, text="📂 Cargar Proyecto", command=self.load_project_action).pack(side="left", padx=5, pady=5)
+        ttk.Separator(self.project_toolbar, orient="vertical").pack(side="left", fill="y", padx=10, pady=5)
+        ttk.Label(self.project_toolbar, text="Gestión de Sesión", font=("Arial", 9, "italic")).pack(side="left", pady=5)
+
+        # Notebook
         self.main_notebook = ttk.Notebook(self.window)
         self.main_notebook.pack(fill="both", expand=True, padx=10, pady=(5, 0))
 
+        # Status Bar
         self.status_frame = ttk.Frame(self.window, relief=tk.SUNKEN, padding=(5, 2))
         self.status_frame.pack(side="bottom", fill="x")
         self.lbl_status = ttk.Label(self.status_frame, text="Listo", anchor="w")
         self.lbl_status.pack(side="left", fill="x")
         self.progress = ttk.Progressbar(self.status_frame, mode='indeterminate', length=200)
 
-        # Pestañas
+        # Tabs
         self.tab_hora_exacta = ttk.Frame(self.main_notebook)
         self.main_notebook.add(self.tab_hora_exacta, text="⏱️ Hora Exacta")
         self._setup_hora_exacta_view()
@@ -54,22 +62,60 @@ class MainWindow:
         self._setup_analisis_energia_view()
 
     # ========================================================
-    #  MÉTODO DE CIERRE FORZADO (NUEVO)
+    #  ACCIONES DE PROYECTO (NUEVO)
     # ========================================================
+    def save_project_action(self):
+        path = filedialog.asksaveasfilename(defaultextension=".dat", filetypes=[("Project Data", "*.dat")])
+        if not path: return
+        def _save():
+            self.controller.save_project_state(path)
+        self.run_task("Guardando proyecto", _save)
+
+    def load_project_action(self):
+        path = filedialog.askopenfilename(filetypes=[("Project Data", "*.dat")])
+        if not path: return
+        def _load():
+            self.controller.load_project_state(path)
+            # IMPORTANTE: Refrescar UI en el hilo principal
+            self.window.after(100, self._refresh_full_ui)
+        self.run_task("Cargando proyecto", _load)
+
+    def _refresh_full_ui(self):
+        """Refresca todas las pestañas con los datos cargados"""
+        # 1. Hora Exacta
+        devs_he = self.controller.get_devices('hora_exacta')
+        self.dd_hora.update_options(devs_he)
+        if devs_he: 
+            self.dd_hora._combobox.set(devs_he[0])
+            self.show_table_dual('hora_exacta', devs_he[0], self.table_hora)
+
+        # 2. Ciclos
+        devs_ci = self.controller.get_devices('ciclos')
+        self.dd_ciclos.update_options(devs_ci)
+        if devs_ci: 
+            self.dd_ciclos._combobox.set(devs_ci[0])
+            self._on_ciclos_device_select(devs_ci[0])
+
+        # 3. Escalones
+        devs_es = self.controller.get_devices('escalones')
+        self.dd_escalones.update_options(devs_es)
+        if devs_es: 
+            self.dd_escalones._combobox.set(devs_es[0])
+            self._on_escalones_device_select(devs_es[0])
+
+        # 4. Analytics
+        self._refresh_analytics('hora_exacta') # Refresca todo
+
+        messagebox.showinfo("Éxito", "Proyecto cargado correctamente.")
+
+    # --- RESTO DEL CÓDIGO (IGUAL) ---
     def on_closing(self):
-        """Mata todos los procesos al cerrar la ventana"""
         if messagebox.askokcancel("Salir", "¿Seguro que quieres salir?"):
             try:
-                # 1. Cerrar gráficas de matplotlib pendientes en memoria
                 plt.close('all')
-                
-                # 2. Destruir ventana de Tkinter
                 self.window.destroy()
-                
-                # 3. Forzar salida del sistema (Mata el proceso .exe)
                 sys.exit(0)
-            except:
-                sys.exit(0) # Salida forzosa si algo falla
+            except: sys.exit(0)
 
     def run_task(self, description, func):
         self.window.config(cursor="watch")
@@ -87,6 +133,11 @@ class MainWindow:
             self.progress.stop()
             self.progress.pack_forget()
             self.window.config(cursor="")
+
+    # ... (Mantener el resto de métodos _setup_*, load_csv_generic, etc. sin cambios) ...
+    # SOLO PEGO LAS PARTES QUE CAMBIAN PARA AHORRAR ESPACIO, PERO TÚ USA TU ARCHIVO MAIN_WINDOW.PY COMPLETO
+    # Y SOLO AGREGA LOS MÉTODOS DE ARRIBA.
+    # SI PREFIERES, PUEDO PEGAR TODO EL MAIN_WINDOW.PY OTRA VEZ.
 
     # --- SETUP VISTAS ---
     def _setup_hora_exacta_view(self):
@@ -207,28 +258,20 @@ class MainWindow:
         house_code = simpledialog.askstring("Exportar", "Ingrese el Código de la Casa:")
         if house_code is None: return
         safe_name = "".join(c for c in house_code if c.isalnum() or c in (' ', '-', '_')).strip() or "Reporte"
-        
         path = filedialog.asksaveasfilename(initialfile=f"{safe_name}.xlsx", defaultextension=".xlsx", filetypes=[("Excel","*.xlsx")])
         if not path: return
-        
-        # Recoger Gráficas
         figs = {}
         if hasattr(self, 'view_energia'):
-            if hasattr(self.view_energia, 'fig_pie'): figs['Distribución'] = self.view_energia.fig_pie
+            if hasattr(self.view_energia, 'fig_pie'): figs['Diagrama Torta'] = self.view_energia.fig_pie
             if hasattr(self.view_energia, 'fig_pareto'): figs['Pareto'] = self.view_energia.fig_pareto
-            
-        # RECOGER VALOR FACTURA (NUEVO)
         bill_val = 0.0
         try:
             if hasattr(self, 'view_energia') and hasattr(self.view_energia, 'ent_bill_input'):
                 v = self.view_energia.ent_bill_input.get()
                 if v: bill_val = float(v)
         except: pass
-
         def _do_export():
-            # Pasamos el valor de la factura
             self.controller.export_report(path, figs, bill_val)
-            
         self.run_task(f"Generando {safe_name}...", _do_export)
 
     def load_csv_generic(self, k, d, t):

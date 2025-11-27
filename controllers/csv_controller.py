@@ -753,3 +753,36 @@ class CSVController:
                         row_idx += 25
                 wb.save(filename)
         except Exception as e: raise CSVServiceError(f"Error escribiendo Excel: {e}")
+    
+    # --- GESTIÓN DE MEMORIA PARA GUARDADO DE PROYECTO ---
+    def set_device_config_simple(self, context_key, device_name, count, starts, ends=None):
+        if context_key in self.contexts:
+            self.contexts[context_key].device_configs[device_name] = {'type': 'simple', 'count': count, 'starts': starts, 'ends': ends or []}
+    def set_device_config_weekly(self, context_key, device_name, wd_count, wd_starts, wd_ends, we_count, we_starts, we_ends):
+        if context_key in self.contexts:
+            self.contexts[context_key].device_configs[device_name] = {
+                'type': 'weekly',
+                'weekday': {'count': wd_count, 'starts': wd_starts, 'ends': wd_ends},
+                'weekend': {'count': we_count, 'starts': we_starts, 'ends': we_ends}
+            }
+    def save_project_state(self, filepath: str):
+        import pickle
+        try:
+            with open(filepath, 'wb') as f: pickle.dump(self.contexts, f)
+        except Exception as e: raise CSVServiceError(f"Error al guardar proyecto: {e}")
+    def load_project_state(self, filepath: str):
+        import pickle
+        try:
+            with open(filepath, 'rb') as f:
+                loaded_contexts = pickle.load(f)
+            if isinstance(loaded_contexts, dict): self.contexts = loaded_contexts
+            else: raise CSVServiceError("Archivo corrupto.")
+        except Exception as e: raise CSVServiceError(f"Error al cargar: {e}")
+
+    def _parse_date(self, date_str: str) -> Optional[datetime]:
+        if not date_str: return None
+        formats = ["%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
+        for fmt in formats:
+            try: return datetime.strptime(date_str.strip(), fmt)
+            except ValueError: continue
+        return None
