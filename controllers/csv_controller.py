@@ -19,547 +19,24 @@ class CSVContext:
 
 class CSVController:
     def __init__(self):
-        print("--- CONTROLADOR MAESTRO V32: TODAS LAS FUNCIONES INTEGRADAS ---")
+        print("--- CONTROLADOR V44: AIRES (100+ESTABILIDAD+60) + TODO ---")
         self.contexts: Dict[str, CSVContext] = {
             'hora_exacta': CSVContext(),
             'general': CSVContext(),
             'ciclos': CSVContext(),
-            'escalones': CSVContext()
+            'escalones': CSVContext(),
+            'aires': CSVContext()
         }
         self.last_warning: str | None = None
         self.VOLTAGE = 120.0 
 
     # =========================================================================
-    #  1. GESTIÓN DE MEMORIA Y CONFIGURACIÓN
+    #  MÉTODOS DE CÁLCULO
     # =========================================================================
-    def set_device_config_simple(self, context_key, device_name, count, starts, ends=None):
-        if context_key in self.contexts:
-            self.contexts[context_key].device_configs[device_name] = {'type': 'simple', 'count': count, 'starts': starts, 'ends': ends or []}
-
-    def set_device_config_weekly(self, context_key, device_name, wd_count, wd_starts, wd_ends, we_count, we_starts, we_ends):
-        if context_key in self.contexts:
-            self.contexts[context_key].device_configs[device_name] = {
-                'type': 'weekly',
-                'weekday': {'count': wd_count, 'starts': wd_starts, 'ends': wd_ends},
-                'weekend': {'count': we_count, 'starts': we_starts, 'ends': we_ends}
-            }
-
-    def get_device_config(self, context_key, device_name):
-        if context_key in self.contexts:
-            return self.contexts[context_key].device_configs.get(device_name, {})
-        return {}
-
-    def get_devices(self, context_key: str):
-        if context_key in self.contexts: return list(self.contexts[context_key].device_columns.keys())
-        return []
-
-    # =========================================================================
-    #  2. LECTURA Y PARSEO (CON DETECCIÓN DE AIRES)
-    # =========================================================================
-    def load_csv(self, path: str, context_key: str):
-        if context_key not in self.contexts: self.contexts[context_key] = CSVContext()
-        ctx = self.contexts[context_key]
-        try:
-            ctx.data = CSVService.read_csv(path)
-            ctx.analysis_cache.clear()
-            ctx.device_configs.clear()
-            ctx.device_meta.clear()
-        except CSVServiceError: raise
-        except Exception as e: raise CSVServiceError(f"Error inesperado al leer CSV: {e}")
-
-        if not ctx.data.columns: raise CSVServiceError("CSV sin encabezados.")
-        if len(ctx.data.columns) < 1: raise CSVServiceError("El CSV está vacío.")
-
-        self._parse_device_pairs(ctx, context_key)
-        if not ctx.device_columns: raise CSVServiceError("No se encontraron dispositivos válidos.")
-        return ctx.data
-
-    def _parse_device_pairs(self, ctx: CSVContext, context_key: str):
-        ctx.device_columns = {}
-        cols = [col.strip() for col in ctx.data.columns]
-        i = 0
-        pairs_found = False
-        
-        # Modo Escalones (Simple)
-        if context_key == 'escalones':
-            has_dates = False
-            for col in cols:
-                if "fecha" in col.lower() or "hora" in col.lower(): has_dates = True; break
-            if not has_dates:
-                for col in cols:
-                    if not col: continue
-                    device_name = col.strip()
-                    original = device_name
-                    suffix = 1
-                    while device_name in ctx.device_columns:
-                        suffix += 1
-                        device_name = f"{original}_{suffix}"
-                    ctx.device_columns[device_name] = (None, col)
-                return
-
-        # Modo Estándar
-        while i + 1 < len(cols):
-            fecha_col = cols[i]
-            value_col = cols[i + 1]
-            f_low = fecha_col.lower()
-            if "fecha" in f_low or "hora" in f_low or "time" in f_low:
-                # Extracción de Metadatos (Aires)
-                raw_name = fecha_col
-                device_name, meta = self._extract_device_info(raw_name)
-                if not device_name: device_name = value_col
-                device_name = device_name.strip()
-                
-                if device_name:
-                    original = device_name
-                    suffix = 1
-                    while device_name in ctx.device_columns:
-                        suffix += 1
-                        device_name = f"{original}_{suffix}"
-                    ctx.device_columns[device_name] = (fecha_col, value_col)
-                    if meta: ctx.device_meta[device_name] = meta
-                    pairs_found = True
-            i += 2
-
-    def _extract_device_info(self, col_name: str) -> Tuple[str, Optional[Dict]]:
-        clean_name = col_name
-        patterns = ['fecha hora', 'fecha/hora', 'fechahora', 'fecha', 'hora', 'timestamp']
-        for p in patterns: clean_name = clean_name.lower().replace(p, '')
-        clean_name = clean_name.strip()
-        # Regex para Aires: "Aire 2 220"
-        match = re.search(r'^(.*)\s+(\d+)\s+(\d+)$', clean_name)
-        if match:
-            base_name = match.group(1).strip().title()
-            qty = int(match.group(2))
-            volts = float(match.group(3))
-            return base_name, {'quantity': qty, 'voltage': volts}
-        return clean_name.title(), None
-
-    def _extract_device_name(self, date_column: str) -> str:
-        n, _ = self._extract_device_info(date_column)
-        return n
-
-    def _detect_date_format(self, rows, col_idx):
-        if not rows: return "%d/%m/%Y %H:%M:%S"
-        # Muestreo inicial para separador
-        sep = '/'
-        for row in rows[:10]:
-            if col_idx < len(row) and '-' in row[col_idx]:
-                sep = '-'
-                break
-        
-        p1_values = set()
-        p2_values = set()
-        
-        for row in rows:
-            if col_idx >= len(row): continue
-            val = row[col_idx].strip().split(' ')[0]
-            if not val: continue
-            parts = val.split(sep)
-            if len(parts) >= 2:
-                try:
-                    n1 = int(parts[0])
-                    n2 = int(parts[1])
-                    if n1 > 12: return f"%d{sep}%m{sep}%Y %H:%M:%S" # DD/MM
-                    if n2 > 12: return f"%m{sep}%d{sep}%Y %H:%M:%S" # MM/DD
-                    p1_values.add(n1)
-                    p2_values.add(n2)
-                except: continue
-        
-        # Varianza
-        if len(p1_values) >= len(p2_values): return f"%d{sep}%m{sep}%Y %H:%M:%S"
-        return f"%m{sep}%d{sep}%Y %H:%M:%S"
-
-    def _parse_date(self, date_str: str) -> Optional[datetime]:
-        if not date_str: return None
-        # Fallbacks
-        formats = ["%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
-        for fmt in formats:
-            try: return datetime.strptime(date_str.strip(), fmt)
-            except ValueError: continue
-        return None
-
-    # =========================================================================
-    #  3. OBTENCIÓN DE DATOS Y TABLAS
-    # =========================================================================
-    def get_dual_table_data(self, context_key: str, device_name: str) -> List[Tuple[str, str, str]]:
-        if context_key == 'hora_exacta':
-            rows = self.get_values_for_device(context_key, device_name)
-            return [(r[0], r[1], r[1]) for r in rows]
-
-        config = self.get_device_config(context_key, device_name)
-        wd_starts, wd_ends = [], []
-        we_starts, we_ends = [], []
-
-        if config.get('type') == 'weekly':
-            wd = config.get('weekday', {})
-            we = config.get('weekend', {})
-            wd_starts, wd_ends = wd.get('starts', []), wd.get('ends', [])
-            we_starts, we_ends = we.get('starts', []), we.get('ends', [])
-        else:
-            start = config.get('starts', ["00:00"])
-            end = config.get('ends', ["01:00"])
-            wd_starts, wd_ends = start, end
-            we_starts, we_ends = start, end
-
-        rows_wd = self.get_values_for_device(context_key, device_name, wd_starts, wd_ends)
-        rows_we = self.get_values_for_device(context_key, device_name, we_starts, we_ends)
-
-        combined = []
-        max_len = max(len(rows_wd), len(rows_we))
-        for i in range(max_len):
-            t_str = rows_wd[i][0] if i < len(rows_wd) else (rows_we[i][0] if i < len(rows_we) else "")
-            val_wd = rows_wd[i][1] if i < len(rows_wd) else "0"
-            val_we = rows_we[i][1] if i < len(rows_we) else "0"
-            combined.append((t_str, val_wd, val_we))
-        return combined
-
-    def get_values_for_device(self, context_key: str, device_name: str, start_times: List[str] = None, end_times: List[str] = None) -> List[Tuple[str, str]]:
-        self.last_warning = None
-        if context_key not in self.contexts or not self.contexts[context_key].data:
-            raise CSVServiceError(f"No hay datos cargados en {context_key}.")
-        ctx = self.contexts[context_key]
-        if device_name not in ctx.device_columns: raise CSVServiceError(f"Dispositivo '{device_name}' no encontrado.")
-        fecha_col, val_col = ctx.device_columns[device_name]
-        raw_data = []
-        nominal_power_str = "0"
-        max_val_found = 0.0
-
-        # Lectura de datos crudos
-        if fecha_col:
-            try:
-                fecha_idx = ctx.data.columns.index(fecha_col)
-                val_idx = ctx.data.columns.index(val_col)
-            except ValueError: raise CSVServiceError("Error de índices.")
-            
-            date_fmt = self._detect_date_format(ctx.data.rows, fecha_idx)
-            
-            for row in ctx.data.rows:
-                f_str = row[fecha_idx] if fecha_idx < len(row) else ""
-                v_str = row[val_idx] if val_idx < len(row) else ""
-                try: dt = datetime.strptime(f_str.strip(), date_fmt)
-                except:
-                    try: dt = datetime.strptime(f_str.strip(), date_fmt.replace(":%S", ""))
-                    except: continue
-                raw_data.append((dt, f_str, v_str))
-                try:
-                    val = float(v_str.replace(',', '.'))
-                    if val > max_val_found:
-                        max_val_found = val
-                        nominal_power_str = v_str
-                except: continue
-            raw_data.sort(key=lambda x: x[0])
-        else:
-            # Escalones simple
-            try: val_idx = ctx.data.columns.index(val_col)
-            except ValueError: raise CSVServiceError("Error de índices.")
-            for row in ctx.data.rows:
-                if val_idx < len(row):
-                    v_str = row[val_idx]
-                    try:
-                        val = float(v_str.replace(',', '.'))
-                        if val > max_val_found:
-                            max_val_found = val
-                            nominal_power_str = v_str
-                    except: continue
-
-        dev_lower = device_name.lower()
-        
-        # RUTEADOR DE LÓGICA
-        if context_key == 'hora_exacta' and ("nevera" in dev_lower or "neve" in dev_lower):
-            final_data = self._process_nevera_logic(raw_data)
-            return final_data # Devuelve lista [(str, str)], NO tuples de 3
-        
-        elif context_key == 'ciclos' and start_times is not None:
-            multi_cycle = self._apply_multi_cycle_day(raw_data, start_times)
-            return [(item[1], item[2]) for item in multi_cycle]
-            
-        elif context_key == 'escalones' and start_times is not None and end_times is not None:
-            if raw_data: base_date = raw_data[0][0].date()
-            else: base_date = datetime.now().date()
-            step_data = self._generate_step_profile(nominal_power_str, base_date, start_times, end_times)
-            return [(item[1], item[2]) for item in step_data]
-            
-        else:
-            return [(item[1], item[2]) for item in raw_data]
-
-    # =========================================================================
-    #  4. LÓGICAS ESPECÍFICAS (NEVERA, CICLOS, ESCALONES)
-    # =========================================================================
-    
-    def _process_nevera_logic(self, sorted_data):
-        """Lógica inteligente para Nevera: Une datos, rellena huecos y fuerza 24h"""
-        if not sorted_data: return []
-        start_dt = sorted_data[0][0]
-        target_day_date = (start_dt + timedelta(days=1)).date()
-        
-        # 1. Unir datos del día objetivo y el anterior (shift)
-        mapped_data = []
-        for dt, _, v_str in sorted_data:
-            current_date = dt.date()
-            new_dt = None
-            if current_date == target_day_date:
-                new_dt = dt
-            elif current_date == start_dt.date():
-                shifted = dt + timedelta(days=1)
-                if shifted.date() == target_day_date:
-                    new_dt = shifted
-            if new_dt: mapped_data.append((new_dt, v_str))
-        
-        if not mapped_data: return [(item[1], item[2]) for item in sorted_data]
-        mapped_data.sort(key=lambda x: x[0])
-        
-        # 2. Rellenar huecos usando patrón
-        day_start = datetime.combine(target_day_date, time(0,0,0))
-        day_end = datetime.combine(target_day_date, time(23,59,0))
-        
-        data_map = {}
-        valid_values = []
-        for dt, val in mapped_data:
-            # Redondear al minuto
-            minute_key = dt.replace(second=0, microsecond=0)
-            data_map[minute_key] = val
-            valid_values.append(val)
-            
-        final_rows = []
-        current = day_start
-        missing_minutes = 0
-        
-        while current <= day_end:
-            if current in data_map:
-                final_rows.append((current, current.strftime("%d/%m/%Y %H:%M:%S"), data_map[current]))
-            else:
-                missing_minutes += 1
-                fill_val = "0"
-                # Pattern cloning
-                if valid_values:
-                    minute_of_day = (current - day_start).seconds // 60
-                    clone_idx = minute_of_day % len(valid_values)
-                    fill_val = valid_values[clone_idx]
-                final_rows.append((current, current.strftime("%d/%m/%Y %H:%M:%S"), fill_val))
-            current += timedelta(minutes=1)
-        
-        # Advertencia si faltó mucho
-        if missing_minutes > 60:
-            hours_missing = missing_minutes / 60
-            self.last_warning = f"⚠️ Faltaban {hours_missing:.1f}h. Se reconstruyó el patrón."
-        
-        return [(r[1], r[2]) for r in final_rows]
-
-    def _apply_multi_cycle_day(self, raw_data, start_times_str):
-        if not raw_data: return []
-        target_times = []
-        for t in start_times_str:
-            try:
-                try: tt = datetime.strptime(t, "%H:%M").time()
-                except: tt = datetime.strptime(t, "%H:%M:%S").time()
-                target_times.append(tt)
-            except: continue
-        
-        base = raw_data[0][0].date()
-        day_s = datetime.combine(base, time(0,0))
-        day_e = day_s + timedelta(hours=24)
-        
-        if not target_times:
-            zeros = []
-            curr = day_s
-            while curr < day_e:
-                zeros.append((curr, curr.strftime("%d/%m/%Y %H:%M:%S"), "0"))
-                curr += timedelta(minutes=1)
-            return zeros
-
-        target_times.sort()
-        cycle_dur = raw_data[-1][0] - raw_data[0][0]
-        orig_first = raw_data[0][0]
-        
-        active_ranges = []
-        for t in target_times:
-            start = datetime.combine(base, t)
-            end = start + cycle_dur
-            if end > day_e:
-                active_ranges.append((start, day_e))
-                active_ranges.append((day_s, day_s + (end - day_e)))
-            else:
-                active_ranges.append((start, end))
-
-        final_rows = []
-        curr = day_s
-        while curr < day_e:
-            is_active = False
-            for s, e in active_ranges:
-                if s <= curr <= e: is_active = True; break
-            if not is_active: final_rows.append((curr, curr.strftime("%d/%m/%Y %H:%M:%S"), "0"))
-            curr += timedelta(minutes=1)
-
-        for t in target_times:
-            cycle_start = datetime.combine(base, t)
-            offset = cycle_start - orig_first
-            for dt, _, val in raw_data:
-                new_dt = dt + offset
-                while new_dt >= day_e: new_dt -= timedelta(hours=24)
-                while new_dt < day_s: new_dt += timedelta(hours=24)
-                final_rows.append((new_dt, new_dt.strftime("%d/%m/%Y %H:%M:%S"), val))
-        final_rows.sort(key=lambda x: x[0])
-        return final_rows
-
-    def _generate_step_profile(self, nominal_val_str, base_date, start_times, end_times):
-        timeline = []
-        current = datetime.combine(base_date, time(0,0))
-        end_of_day = current + timedelta(hours=24)
-        while current < end_of_day:
-            timeline.append({'dt': current, 'str': current.strftime("%d/%m/%Y %H:%M:%S"), 'val': "0"})
-            current += timedelta(minutes=1)
-        if not start_times: return [(t['dt'], t['str'], t['val']) for t in timeline]
-        
-        for i in range(len(start_times)):
-            if i >= len(end_times): break
-            try:
-                t_s = datetime.strptime(start_times[i], "%H:%M").time()
-                t_e = datetime.strptime(end_times[i], "%H:%M").time()
-                dt_s = datetime.combine(base_date, t_s)
-                dt_e = datetime.combine(base_date, t_e)
-                if dt_e < dt_s:
-                    dt_end_day = datetime.combine(base_date, time(23,59,59))
-                    dt_start_day = datetime.combine(base_date, time(0,0))
-                    for p in timeline:
-                        if dt_s <= p['dt'] <= dt_end_day: p['val'] = nominal_val_str
-                        if dt_start_day <= p['dt'] < dt_e: p['val'] = nominal_val_str
-                else:
-                    for p in timeline:
-                        if dt_s <= p['dt'] < dt_e: p['val'] = nominal_val_str
-            except: continue
-        return [(t['dt'], t['str'], t['val']) for t in timeline]
-
-    # =========================================================================
-    #  5. VECTORES Y ANÁLISIS
-    # =========================================================================
-    def get_daily_power_vector(self, context_key: str, device_name: str, starts=None, ends=None) -> List[float]:
-        data_rows = self.get_values_for_device(context_key, device_name, starts, ends)
-        if not data_rows: return [0.0] * 1440
-        power_axis = [0.0] * 1440
-        
-        ctx = self.contexts.get(context_key)
-        meta = ctx.device_meta.get(device_name, {})
-        conversion_factor = self.VOLTAGE
-        
-        if context_key == 'escalones': 
-            conversion_factor = 1.0
-        elif meta:
-            q = meta.get('quantity', 1)
-            v = meta.get('voltage', 120.0)
-            conversion_factor = q * v
-
-        try:
-            sample_date = data_rows[0][0]
-            fmt = "%d/%m/%Y %H:%M:%S"
-            if '/' in sample_date:
-                # Detector rápido para vector
-                parts = sample_date.split(' ')[0].split('/')
-                if int(parts[0]) > 12: fmt = "%d/%m/%Y %H:%M:%S"
-                elif int(parts[1]) > 12: fmt = "%m/%d/%Y %H:%M:%S"
-            first_dt = datetime.strptime(sample_date, fmt)
-            start_of_day = datetime.combine(first_dt.date(), time(0,0))
-        except: 
-            start_of_day = datetime.combine(datetime.now().date(), time(0,0))
-            fmt = "%d/%m/%Y %H:%M:%S"
-
-        minute_buckets = {i: [] for i in range(1440)}
-        for t_str, v_str in data_rows:
-            try: dt = datetime.strptime(t_str, fmt)
-            except:
-                 try: dt = datetime.strptime(t_str, "%m/%d/%Y %H:%M:%S")
-                 except: continue
-            minute_idx = int((dt - start_of_day).total_seconds() // 60) % 1440
-            try:
-                val = float(v_str.replace(',', '.'))
-                minute_buckets[minute_idx].append(val)
-            except: continue
-            
-        for i in range(1440):
-            values = minute_buckets[i]
-            if values:
-                avg = sum(values) / len(values)
-                power_axis[i] = avg * conversion_factor
-        return power_axis
-
-    def get_typical_day_profile(self, context_key: str, device_name: str, day_type: str) -> Tuple[List[datetime], List[float]]:
-        config = self.get_device_config(context_key, device_name)
-        starts, ends = [], []
-        if config.get('type') == 'weekly':
-            sub = config.get(day_type, {})
-            starts, ends = sub.get('starts', []), sub.get('ends', [])
-        else:
-            starts, ends = config.get('starts'), config.get('ends')
-        p_vec = self.get_daily_power_vector(context_key, device_name, starts, ends)
-        base = datetime.now().date()
-        t_axis = [datetime.combine(base, time(0,0)) + timedelta(minutes=i) for i in range(1440)]
-        return t_axis, p_vec
-
-    def get_total_typical_profile(self, day_type: str, is_energy=False) -> Tuple[List[datetime], List[float]]:
-        total = [0.0] * 1440
-        time_axis = []
-        for ctx in ['hora_exacta', 'ciclos', 'escalones']:
-            for dev in self.get_devices(ctx):
-                t, p = self.get_typical_day_profile(ctx, dev, day_type)
-                if not time_axis: time_axis = t
-                for i in range(1440):
-                    if i < len(p): total[i] += p[i]
-        if not time_axis:
-            base = datetime.now().date()
-            time_axis = [datetime.combine(base, time(0,0)) + timedelta(minutes=i) for i in range(1440)]
-        if is_energy:
-            eng = [0.0] * 1440
-            acc = 0.0
-            for i in range(1440):
-                acc += total[i] * (1.0/60000.0)
-                eng[i] = acc
-            return time_axis, eng
-        return time_axis, total
-
-    def get_weekly_power_vector(self, context_key: str, device_name: str) -> Tuple[List[str], List[float]]:
-        t_wd, p_wd = self.get_typical_day_profile(context_key, device_name, 'weekday')
-        t_we, p_we = self.get_typical_day_profile(context_key, device_name, 'weekend')
-        w_p, w_t = [], []
-        base = datetime.now().date()
-        base = base - timedelta(days=base.weekday())
-        curr = datetime.combine(base, time(0,0))
-        for d in range(7):
-            prof = p_wd if d < 5 else p_we
-            w_p.extend(prof)
-            for _ in range(1440):
-                w_t.append(curr)
-                curr += timedelta(minutes=1)
-        return w_t, w_p
-
-    def get_total_weekly_vector(self, is_energy=False) -> Tuple[List[str], List[float]]:
-        tot = [0.0] * 10080
-        tm = []
-        for ctx in ['hora_exacta', 'ciclos', 'escalones']:
-            for dev in self.get_devices(ctx):
-                t, p = self.get_weekly_power_vector(ctx, dev)
-                if not tm: tm = t
-                for i in range(min(len(tot), len(p))): tot[i] += p[i]
-        if not tm:
-            base = datetime.now().date()
-            base = base - timedelta(days=base.weekday())
-            curr = datetime.combine(base, time(0,0))
-            for _ in range(10080):
-                tm.append(curr)
-                curr += timedelta(minutes=1)
-        if is_energy:
-            eng = [0.0]*10080
-            acc = 0.0
-            for i in range(10080):
-                acc += tot[i] * (1.0/60000.0)
-                eng[i] = acc
-            return tm, eng
-        return tm, tot
-
     def get_monthly_projection(self) -> Tuple[List[Dict], float]:
         rows, totals = self.get_energy_summary()
-        monthly_rows = []
-        grand_total_month = 0.0
-        
         temp_list = []
+        grand_total_month = 0.0
         luminarias_total = 0.0
         found_luminarias = False
         
@@ -599,7 +76,7 @@ class CSVController:
         grand_totals = {'daily_wd': 0.0, 'daily_we': 0.0, 'total_5d': 0.0, 'total_2d': 0.0, 'total_week': 0.0}
         factor = 1.0 / 60000.0
 
-        for ctx in ['hora_exacta', 'ciclos', 'escalones']:
+        for ctx in ['hora_exacta', 'ciclos', 'escalones', 'aires']:
             devices = self.get_devices(ctx)
             for dev in devices:
                 _, p_wd = self.get_typical_day_profile(ctx, dev, 'weekday')
@@ -629,84 +106,582 @@ class CSVController:
         for k in grand_totals: grand_totals[k] = round(grand_totals[k], 4)
         return summary_rows, grand_totals
 
-    def get_device_statistics(self, context_key: str, device_name: str) -> Dict: return {}
-    def get_all_statistics(self, context_key: str) -> Dict: return {}
+    # --- GESTIÓN DE MEMORIA ---
+    def set_device_config_simple(self, context_key, device_name, count, starts, ends=None):
+        if context_key in self.contexts:
+            self.contexts[context_key].device_configs[device_name] = {'type': 'simple', 'count': count, 'starts': starts, 'ends': ends or []}
+    def set_device_config_weekly(self, context_key, device_name, wd_count, wd_starts, wd_ends, we_count, we_starts, we_ends):
+        if context_key in self.contexts:
+            self.contexts[context_key].device_configs[device_name] = {
+                'type': 'weekly',
+                'weekday': {'count': wd_count, 'starts': wd_starts, 'ends': wd_ends},
+                'weekend': {'count': we_count, 'starts': we_starts, 'ends': we_ends}
+            }
+    def get_device_config(self, context_key, device_name):
+        if context_key in self.contexts: return self.contexts[context_key].device_configs.get(device_name, {})
+        return {}
+
+    # --- LECTURA ---
+    def load_csv(self, path: str, context_key: str):
+        if context_key not in self.contexts: self.contexts[context_key] = CSVContext()
+        ctx = self.contexts[context_key]
+        try:
+            ctx.data = CSVService.read_csv(path)
+            ctx.analysis_cache.clear()
+            ctx.device_configs.clear()
+            ctx.device_meta.clear()
+        except CSVServiceError: raise
+        except Exception as e: raise CSVServiceError(f"Error inesperado al leer CSV: {e}")
+        if not ctx.data.columns: raise CSVServiceError("CSV sin encabezados.")
+        if len(ctx.data.columns) < 1: raise CSVServiceError("El CSV está vacío.")
+        self._parse_device_pairs(ctx, context_key)
+        if not ctx.device_columns: raise CSVServiceError("No se encontraron dispositivos válidos.")
+        return ctx.data
+
+    def _parse_device_pairs(self, ctx: CSVContext, context_key: str):
+        ctx.device_columns = {}
+        cols = [col.strip() for col in ctx.data.columns]
+        i = 0
+        pairs_found = False
+        while i + 1 < len(cols):
+            fecha_col = cols[i]
+            value_col = cols[i + 1]
+            f_low = fecha_col.lower()
+            if "fecha" in f_low or "hora" in f_low or "time" in f_low:
+                raw_name = fecha_col
+                device_name, meta = self._extract_device_info(raw_name)
+                if not device_name: device_name = value_col
+                device_name = device_name.strip()
+                if device_name:
+                    original = device_name
+                    suffix = 1
+                    while device_name in ctx.device_columns:
+                        suffix += 1
+                        device_name = f"{original}_{suffix}"
+                    ctx.device_columns[device_name] = (fecha_col, value_col)
+                    if meta: ctx.device_meta[device_name] = meta
+                    pairs_found = True
+            i += 2
+        if context_key == 'escalones' and not pairs_found:
+            for col in cols:
+                if not col: continue
+                device_name = col.strip()
+                original = device_name
+                suffix = 1
+                while device_name in ctx.device_columns:
+                    suffix += 1
+                    device_name = f"{original}_{suffix}"
+                ctx.device_columns[device_name] = (None, col)
+
+    def _extract_device_info(self, col_name: str) -> Tuple[str, Optional[Dict]]:
+        clean_name = col_name
+        patterns = ['fecha hora', 'fecha/hora', 'fechahora', 'fecha', 'hora', 'timestamp']
+        for p in patterns: clean_name = clean_name.lower().replace(p, '')
+        clean_name = clean_name.strip()
+        match = re.search(r'^(.*)\s+(\d+)\s+(\d+)$', clean_name)
+        if match:
+            base_name = match.group(1).strip().title()
+            qty = int(match.group(2))
+            volts = float(match.group(3))
+            return base_name, {'quantity': qty, 'voltage': volts}
+        return clean_name.title(), None
+
+    def _extract_device_name(self, date_column: str) -> str:
+        n, _ = self._extract_device_info(date_column)
+        return n
+
+    def _detect_date_format(self, rows, col_idx):
+        if not rows: return "%d/%m/%Y %H:%M:%S"
+        sep = '/'
+        for row in rows[:10]:
+            if col_idx < len(row) and row[col_idx].strip() and '-' in row[col_idx]: sep = '-'; break
+        p1_values, p2_values = set(), set()
+        for row in rows:
+            if col_idx >= len(row): continue
+            val = row[col_idx].strip().split(' ')[0]
+            if not val: continue
+            parts = val.split(sep)
+            if len(parts) >= 2:
+                try:
+                    n1 = int(parts[0])
+                    n2 = int(parts[1])
+                    if n1 > 12: return f"%d{sep}%m{sep}%Y %H:%M:%S"
+                    if n2 > 12: return f"%m{sep}%d{sep}%Y %H:%M:%S"
+                    p1_values.add(n1); p2_values.add(n2)
+                except: continue
+        if len(p1_values) >= len(p2_values): return f"%d{sep}%m{sep}%Y %H:%M:%S"
+        return f"%m{sep}%d{sep}%Y %H:%M:%S"
+
+    def get_devices(self, context_key: str):
+        if context_key in self.contexts: return list(self.contexts[context_key].device_columns.keys())
+        return []
+
+    def _parse_date(self, date_str: str) -> Optional[datetime]:
+        if not date_str: return None
+        formats = ["%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
+        for fmt in formats:
+            try: return datetime.strptime(date_str.strip(), fmt)
+            except ValueError: continue
+        return None
+
+    # --- TABLA DUAL ---
+    def get_dual_table_data(self, context_key: str, device_name: str) -> List[Tuple[str, str, str]]:
+        if context_key == 'hora_exacta':
+            rows = self.get_values_for_device(context_key, device_name)
+            return [(r[0], r[1], r[1]) for r in rows]
+        config = self.get_device_config(context_key, device_name)
+        wd_starts, wd_ends = [], []
+        we_starts, we_ends = [], []
+        if config.get('type') == 'weekly':
+            wd = config.get('weekday', {})
+            we = config.get('weekend', {})
+            wd_starts, wd_ends = wd.get('starts', []), wd.get('ends', [])
+            we_starts, we_ends = we.get('starts', []), we.get('ends', [])
+        else:
+            start = config.get('starts', ["00:00"])
+            end = config.get('ends', ["01:00"])
+            wd_starts, wd_ends = start, end
+            we_starts, we_ends = start, end
+        rows_wd = self.get_values_for_device(context_key, device_name, wd_starts, wd_ends)
+        rows_we = self.get_values_for_device(context_key, device_name, we_starts, we_ends)
+        combined = []
+        max_len = max(len(rows_wd), len(rows_we))
+        for i in range(max_len):
+            t_str = rows_wd[i][0] if i < len(rows_wd) else (rows_we[i][0] if i < len(rows_we) else "")
+            val_wd = rows_wd[i][1] if i < len(rows_wd) else "0"
+            val_we = rows_we[i][1] if i < len(rows_we) else "0"
+            combined.append((t_str, val_wd, val_we))
+        return combined
+
+    # --- OBTENCIÓN DE DATOS ---
+    def get_values_for_device(self, context_key: str, device_name: str, start_times: List[str] = None, end_times: List[str] = None) -> List[Tuple[str, str]]:
+        self.last_warning = None
+        if context_key not in self.contexts or not self.contexts[context_key].data:
+            raise CSVServiceError(f"No hay datos cargados en {context_key}.")
+        ctx = self.contexts[context_key]
+        if device_name not in ctx.device_columns: raise CSVServiceError(f"Dispositivo '{device_name}' no encontrado.")
+        fecha_col, val_col = ctx.device_columns[device_name]
+        raw_data = []
+        nominal_power_str = "0"
+        max_val_found = 0.0
+        if fecha_col:
+            try:
+                fecha_idx = ctx.data.columns.index(fecha_col)
+                val_idx = ctx.data.columns.index(val_col)
+            except ValueError: raise CSVServiceError("Error de índices.")
+            date_fmt = self._detect_date_format(ctx.data.rows, fecha_idx)
+            for row in ctx.data.rows:
+                f_str = row[fecha_idx] if fecha_idx < len(row) else ""
+                v_str = row[val_idx] if val_idx < len(row) else ""
+                try: dt = datetime.strptime(f_str.strip(), date_fmt)
+                except:
+                    try: dt = datetime.strptime(f_str.strip(), date_fmt.replace(":%S", ""))
+                    except: continue
+                raw_data.append((dt, f_str, v_str))
+                try:
+                    val = float(v_str.replace(',', '.'))
+                    if val > max_val_found:
+                        max_val_found = val
+                        nominal_power_str = v_str
+                except: continue
+            raw_data.sort(key=lambda x: x[0])
+        else:
+            try: val_idx = ctx.data.columns.index(val_col)
+            except ValueError: raise CSVServiceError("Error de índices.")
+            for row in ctx.data.rows:
+                if val_idx < len(row):
+                    v_str = row[val_idx]
+                    try:
+                        val = float(v_str.replace(',', '.'))
+                        if val > max_val_found:
+                            max_val_found = val
+                            nominal_power_str = v_str
+                    except: continue
+
+        dev_lower = device_name.lower()
+        
+        if context_key == 'hora_exacta' and ("nevera" in dev_lower or "neve" in dev_lower):
+            return self._process_nevera_logic(raw_data)
+        elif context_key == 'ciclos' and start_times is not None:
+            return [(item[1], item[2]) for item in self._apply_multi_cycle_day(raw_data, start_times)]
+        elif context_key == 'escalones' and start_times is not None and end_times is not None:
+            if raw_data: base_date = raw_data[0][0].date()
+            else: base_date = datetime.now().date()
+            step_data = self._generate_step_profile(nominal_power_str, base_date, start_times, end_times)
+            return [(item[1], item[2]) for item in step_data]
+            
+        # --- AIRES ACONDICIONADOS (NUEVA LÓGICA) ---
+        elif context_key == 'aires' and start_times is not None and end_times is not None:
+            if raw_data: base_date = raw_data[0][0].date()
+            else: base_date = datetime.now().date()
+            ac_data = self._generate_ac_profile(raw_data, base_date, start_times, end_times)
+            return [(item[1], item[2]) for item in ac_data]
+            
+        else:
+            return [(item[1], item[2]) for item in raw_data]
 
     # ========================================================
-    #  EXPORTACIÓN A EXCEL
+    #  LÓGICA AIRES: 100 + ESTABILIDAD + 60 (V44)
     # ========================================================
+    def _generate_ac_profile(self, raw_data, base_date, start_times, end_times):
+        if not raw_data: return []
+        
+        # 1. Extraer numéricos
+        numeric_vals = []
+        for _, _, v in raw_data:
+            try: numeric_vals.append(float(v.replace(',', '.')))
+            except: continue
+        
+        if not numeric_vals: return []
+
+        # 2. Fase 1: Pico (Primeros 100)
+        peak_vals = numeric_vals[:100]
+        
+        # 3. Fase 2: Patrón (Siguientes 60 tras buscar estabilidad)
+        # Simplificamos la búsqueda: tomamos directamente el bloque después del pico si existe
+        remaining = numeric_vals[100:]
+        pattern_vals = []
+        
+        if remaining:
+            # Buscamos en los primeros 50 del restante el punto más estable (menor desviación)
+            # O si es muy corto, tomamos lo que hay
+            best_idx = 0
+            if len(remaining) > 10:
+                min_std = float('inf')
+                scan_limit = min(len(remaining), 50)
+                for i in range(scan_limit - 10):
+                    chunk = remaining[i : i+10]
+                    std = statistics.stdev(chunk)
+                    if std < min_std:
+                        min_std = std
+                        best_idx = i
+            
+            pattern_vals = remaining[best_idx : best_idx + 60]
+        
+        # Fallbacks por si la data es muy corta
+        if not peak_vals: peak_vals = [0.0]
+        if not pattern_vals: pattern_vals = [peak_vals[-1]]
+        
+        peak_strs = [str(v).replace('.', ',') for v in peak_vals]
+        pattern_strs = [str(v).replace('.', ',') for v in pattern_vals]
+
+        # 4. Construir Timeline
+        timeline = []
+        current = datetime.combine(base_date, time(0,0))
+        end_of_day = current + timedelta(hours=24)
+        
+        while current < end_of_day:
+            timeline.append({'dt': current, 'str': current.strftime("%d/%m/%Y %H:%M:%S"), 'val': "0"})
+            current += timedelta(minutes=1)
+            
+        if not start_times: return [(t['dt'], t['str'], t['val']) for t in timeline]
+
+        for i in range(len(start_times)):
+            if i >= len(end_times): break
+            try:
+                t_s = datetime.strptime(start_times[i], "%H:%M").time()
+                t_e = datetime.strptime(end_times[i], "%H:%M").time()
+                dt_s = datetime.combine(base_date, t_s)
+                dt_e = datetime.combine(base_date, t_e)
+                
+                # Índices
+                base_dt = datetime.combine(base_date, time(0,0))
+                start_idx = int((dt_s - base_dt).total_seconds() // 60)
+                end_idx = int((dt_e - base_dt).total_seconds() // 60)
+                
+                indices_to_fill = []
+                if dt_e < dt_s: # Wrap
+                    indices_to_fill.extend(range(start_idx, 1440))
+                    indices_to_fill.extend(range(0, end_idx))
+                else:
+                    indices_to_fill.extend(range(start_idx, end_idx))
+                
+                # Llenado: Pico -> Pattern Loop
+                for step, idx in enumerate(indices_to_fill):
+                    if idx >= 1440: continue
+                    
+                    if step < len(peak_strs):
+                        timeline[idx]['val'] = peak_strs[step]
+                    else:
+                        pat_idx = (step - len(peak_strs)) % len(pattern_strs)
+                        timeline[idx]['val'] = pattern_strs[pat_idx]
+                        
+            except: continue
+            
+        return [(t['dt'], t['str'], t['val']) for t in timeline]
+
+    # --- LÓGICA NEVERA ---
+    def _process_nevera_logic(self, sorted_data):
+        if not sorted_data: return []
+        start_dt = sorted_data[0][0]
+        target_day_date = (start_dt + timedelta(days=1)).date()
+        mapped_data = []
+        for dt, _, v_str in sorted_data:
+            current_date = dt.date()
+            new_dt = None
+            if current_date == target_day_date: new_dt = dt
+            elif current_date == start_dt.date():
+                shifted = dt + timedelta(days=1)
+                if shifted.date() == target_day_date: new_dt = shifted
+            if new_dt: mapped_data.append((new_dt, v_str))
+        if not mapped_data: return [(item[1], item[2]) for item in sorted_data]
+        mapped_data.sort(key=lambda x: x[0])
+        day_start = datetime.combine(target_day_date, time(0,0,0))
+        day_end = datetime.combine(target_day_date, time(23,59,0))
+        data_map = {}
+        valid_values = []
+        for dt, val in mapped_data:
+            minute_key = dt.replace(second=0, microsecond=0)
+            data_map[minute_key] = val
+            valid_values.append(val)
+        final_rows = []
+        current = day_start
+        missing_minutes = 0
+        while current <= day_end:
+            if current in data_map:
+                final_rows.append((current, current.strftime("%d/%m/%Y %H:%M:%S"), data_map[current]))
+            else:
+                missing_minutes += 1
+                fill_val = "0"
+                if valid_values:
+                    minute_of_day = (current - day_start).seconds // 60
+                    clone_idx = minute_of_day % len(valid_values)
+                    fill_val = valid_values[clone_idx]
+                final_rows.append((current, current.strftime("%d/%m/%Y %H:%M:%S"), fill_val))
+            current += timedelta(minutes=1)
+        if missing_minutes > 60:
+            hours_missing = missing_minutes / 60
+            self.last_warning = f"⚠️ Datos Incompletos: Faltaban {hours_missing:.1f} horas. Se completó con patrones."
+        return [(r[1], r[2]) for r in final_rows]
+
+    # --- VECTORES ---
+    def get_daily_power_vector(self, context_key: str, device_name: str, starts=None, ends=None) -> List[float]:
+        data_rows = self.get_values_for_device(context_key, device_name, starts, ends)
+        if not data_rows: return [0.0] * 1440
+        power_axis = [0.0] * 1440
+        ctx = self.contexts.get(context_key)
+        meta = ctx.device_meta.get(device_name, {})
+        conversion_factor = self.VOLTAGE
+        if context_key == 'escalones': conversion_factor = 1.0
+        elif meta:
+            q = meta.get('quantity', 1)
+            v = meta.get('voltage', 120.0)
+            conversion_factor = q * v
+        try:
+            sample_date = data_rows[0][0]
+            fmt = "%d/%m/%Y %H:%M:%S"
+            if '/' in sample_date:
+                parts = sample_date.split(' ')[0].split('/')
+                if int(parts[0]) > 12: fmt = "%d/%m/%Y %H:%M:%S"
+                elif int(parts[1]) > 12: fmt = "%m/%d/%Y %H:%M:%S"
+            first_dt = datetime.strptime(sample_date, fmt)
+            start_of_day = datetime.combine(first_dt.date(), time(0,0))
+        except: 
+            start_of_day = datetime.combine(datetime.now().date(), time(0,0))
+            fmt = "%d/%m/%Y %H:%M:%S"
+        minute_buckets = {i: [] for i in range(1440)}
+        for t_str, v_str in data_rows:
+            try: dt = datetime.strptime(t_str, fmt)
+            except:
+                try: dt = datetime.strptime(t_str, "%m/%d/%Y %H:%M:%S")
+                except: continue
+            minute_idx = int((dt - start_of_day).total_seconds() // 60) % 1440
+            try:
+                val = float(v_str.replace(',', '.'))
+                minute_buckets[minute_idx].append(val)
+            except: continue
+        for i in range(1440):
+            values = minute_buckets[i]
+            if values:
+                avg = sum(values) / len(values)
+                power_axis[i] = avg * conversion_factor
+        return power_axis
+
+    def get_typical_day_profile(self, context_key: str, device_name: str, day_type: str) -> Tuple[List[datetime], List[float]]:
+        config = self.get_device_config(context_key, device_name)
+        starts, ends = [], []
+        if config.get('type') == 'weekly':
+            sub = config.get(day_type, {})
+            starts, ends = sub.get('starts', []), sub.get('ends', [])
+        else:
+            starts, ends = config.get('starts'), config.get('ends')
+        p_vec = self.get_daily_power_vector(context_key, device_name, starts, ends)
+        base = datetime.now().date()
+        t_axis = [datetime.combine(base, time(0,0)) + timedelta(minutes=i) for i in range(1440)]
+        return t_axis, p_vec
+
+    def get_total_typical_profile(self, day_type: str, is_energy=False) -> Tuple[List[datetime], List[float]]:
+        total = [0.0] * 1440
+        time_axis = []
+        for ctx in ['hora_exacta', 'ciclos', 'escalones', 'aires']:
+            for dev in self.get_devices(ctx):
+                t, p = self.get_typical_day_profile(ctx, dev, day_type)
+                if not time_axis: time_axis = t
+                for i in range(1440):
+                    if i < len(p): total[i] += p[i]
+        if not time_axis:
+            base = datetime.now().date()
+            time_axis = [datetime.combine(base, time(0,0)) + timedelta(minutes=i) for i in range(1440)]
+        if is_energy:
+            eng = [0.0] * 1440
+            acc = 0.0
+            for i in range(1440):
+                acc += total[i] * (1.0/60000.0)
+                eng[i] = acc
+            return time_axis, eng
+        return time_axis, total
+
+    def get_weekly_power_vector(self, context_key: str, device_name: str) -> Tuple[List[str], List[float]]:
+        t_wd, p_wd = self.get_typical_day_profile(context_key, device_name, 'weekday')
+        t_we, p_we = self.get_typical_day_profile(context_key, device_name, 'weekend')
+        w_p, w_t = [], []
+        base = datetime.now().date()
+        base = base - timedelta(days=base.weekday())
+        curr = datetime.combine(base, time(0,0))
+        for d in range(7):
+            prof = p_wd if d < 5 else p_we
+            w_p.extend(prof)
+            for _ in range(1440):
+                w_t.append(curr)
+                curr += timedelta(minutes=1)
+        return w_t, w_p
+
+    def get_total_weekly_vector(self, is_energy=False) -> Tuple[List[str], List[float]]:
+        tot = [0.0] * 10080
+        tm = []
+        for ctx in ['hora_exacta', 'ciclos', 'escalones', 'aires']:
+            for dev in self.get_devices(ctx):
+                t, p = self.get_weekly_power_vector(ctx, dev)
+                if not tm: tm = t
+                for i in range(min(len(tot), len(p))): tot[i] += p[i]
+        if not tm:
+            base = datetime.now().date()
+            base = base - timedelta(days=base.weekday())
+            curr = datetime.combine(base, time(0,0))
+            for _ in range(10080):
+                tm.append(curr)
+                curr += timedelta(minutes=1)
+        if is_energy:
+            eng = [0.0]*10080
+            acc = 0.0
+            for i in range(10080):
+                acc += tot[i] * (1.0/60000.0)
+                eng[i] = acc
+            return tm, eng
+        return tm, tot
+
+    def _generate_step_profile(self, nominal_val_str, base_date, start_times, end_times):
+        timeline = []
+        current = datetime.combine(base_date, time(0,0))
+        end_of_day = current + timedelta(hours=24)
+        while current < end_of_day:
+            timeline.append({'dt': current, 'str': current.strftime("%d/%m/%Y %H:%M:%S"), 'val': "0"})
+            current += timedelta(minutes=1)
+        if not start_times: return [(t['dt'], t['str'], t['val']) for t in timeline]
+        for i in range(len(start_times)):
+            if i >= len(end_times): break
+            try:
+                t_s = datetime.strptime(start_times[i], "%H:%M").time()
+                t_e = datetime.strptime(end_times[i], "%H:%M").time()
+                dt_s = datetime.combine(base_date, t_s)
+                dt_e = datetime.combine(base_date, t_e)
+                if dt_e < dt_s:
+                    dt_end_day = datetime.combine(base_date, time(23,59,59))
+                    dt_start_day = datetime.combine(base_date, time(0,0))
+                    for p in timeline:
+                        if dt_s <= p['dt'] <= dt_end_day: p['val'] = nominal_val_str
+                        if dt_start_day <= p['dt'] < dt_e: p['val'] = nominal_val_str
+                else:
+                    for p in timeline:
+                        if dt_s <= p['dt'] < dt_e: p['val'] = nominal_val_str
+            except: continue
+        return [(t['dt'], t['str'], t['val']) for t in timeline]
+
+    def _apply_multi_cycle_day(self, raw_data, start_times_str):
+        if not raw_data: return []
+        target_times = []
+        for t in start_times_str:
+            try:
+                try: tt = datetime.strptime(t, "%H:%M").time()
+                except: tt = datetime.strptime(t, "%H:%M:%S").time()
+                target_times.append(tt)
+            except: continue
+        base = raw_data[0][0].date()
+        day_s = datetime.combine(base, time(0,0))
+        day_e = day_s + timedelta(hours=24)
+        if not target_times:
+            zeros = []
+            curr = day_s
+            while curr < day_e:
+                zeros.append((curr, curr.strftime("%d/%m/%Y %H:%M:%S"), "0"))
+                curr += timedelta(minutes=1)
+            return zeros
+        target_times.sort()
+        cycle_dur = raw_data[-1][0] - raw_data[0][0]
+        orig_first = raw_data[0][0]
+        active_ranges = []
+        for t in target_times:
+            start = datetime.combine(base, t)
+            end = start + cycle_dur
+            if end > day_e:
+                active_ranges.append((start, day_e))
+                active_ranges.append((day_s, day_s + (end - day_e)))
+            else:
+                active_ranges.append((start, end))
+        final_rows = []
+        curr = day_s
+        while curr < day_e:
+            is_active = False
+            for s, e in active_ranges:
+                if s <= curr <= e: is_active = True; break
+            if not is_active: final_rows.append((curr, curr.strftime("%d/%m/%Y %H:%M:%S"), "0"))
+            curr += timedelta(minutes=1)
+        for t in target_times:
+            cycle_start = datetime.combine(base, t)
+            offset = cycle_start - orig_first
+            for dt, _, val in raw_data:
+                new_dt = dt + offset
+                while new_dt >= day_e: new_dt -= timedelta(hours=24)
+                while new_dt < day_s: new_dt += timedelta(hours=24)
+                final_rows.append((new_dt, new_dt.strftime("%d/%m/%Y %H:%M:%S"), val))
+        final_rows.sort(key=lambda x: x[0])
+        return final_rows
+
+    def get_device_statistics(self, context_key: str, device_name: str) -> Dict: return {}
+    def get_all_statistics(self, context_key: str) -> Dict: return {}
+    
     def export_report(self, filename: str, figures: Dict[str, Any] = None, bill_real: float = 0.0):
         import pandas as pd
         import openpyxl
         from openpyxl.drawing.image import Image as ExcelImage
         import io
-        
-        # 1. HOJAS DE POTENCIA
-        base_date = datetime.now().date()
-        time_axis = [datetime.combine(base_date, time(0,0)) + timedelta(minutes=i) for i in range(1440)]
-        str_time = [t.strftime("%H:%M") for t in time_axis]
-        
-        data_lv = {"Hora": str_time}
-        data_sd = {"Hora": str_time}
-        total_lv = [0.0] * 1440
-        total_sd = [0.0] * 1440
-        
-        for ctx in ['hora_exacta', 'ciclos', 'escalones']:
-            for dev in self.get_devices(ctx):
-                _, p_wd = self.get_typical_day_profile(ctx, dev, 'weekday')
-                _, p_we = self.get_typical_day_profile(ctx, dev, 'weekend')
-                
-                col_name = f"{dev} [W]"
-                data_lv[col_name] = p_wd
-                data_sd[col_name] = p_we
-                
-                for i in range(1440):
-                    total_lv[i] += p_wd[i]
-                    total_sd[i] += p_we[i]
-        
-        data_lv["TOTAL [W]"] = total_lv
-        data_sd["TOTAL [W]"] = total_sd
-        df_lv = pd.DataFrame(data_lv)
-        df_sd = pd.DataFrame(data_sd)
-
-        # 2. ENERGÍA DE DISPOSITIVOS
         rows_data, totals = self.get_energy_summary()
         df_weekly = pd.DataFrame(rows_data)
         if 'section' in df_weekly.columns: df_weekly = df_weekly.drop(columns=['section'])
         df_weekly = df_weekly.rename(columns={
-            'device': 'Dispositivo',
-            'daily_wd': 'Día Laboral (kWh)', 'daily_we': 'Fin de Semana (kWh)',
-            'total_5d': 'Total L-V (kWh)', 'total_2d': 'Total S-D (kWh)',
-            'total_week': 'Total Semanal (kWh)'
+            'device': 'Dispositivo', 'daily_wd': 'Día Laboral (kWh)', 'daily_we': 'Fin de Semana (kWh)',
+            'total_5d': 'Total L-V (kWh)', 'total_2d': 'Total S-D (kWh)', 'total_week': 'Total Semanal (kWh)'
         })
         total_row = {
-            'Dispositivo': 'TOTAL GENERAL',
-            'Día Laboral (kWh)': totals['daily_wd'], 'Fin de Semana (kWh)': totals['daily_we'],
-            'Total L-V (kWh)': totals['total_5d'], 'Total S-D (kWh)': totals['total_2d'],
-            'Total Semanal (kWh)': totals['total_week']
+            'Dispositivo': 'TOTAL GENERAL', 'Día Laboral (kWh)': totals['daily_wd'], 'Fin de Semana (kWh)': totals['daily_we'],
+            'Total L-V (kWh)': totals['total_5d'], 'Total S-D (kWh)': totals['total_2d'], 'Total Semanal (kWh)': totals['total_week']
         }
         df_weekly = pd.concat([df_weekly, pd.DataFrame([total_row])], ignore_index=True)
 
-        # 3. PROYECCIÓN MENSUAL
         monthly_rows, monthly_total = self.get_monthly_projection()
         processed_monthly = []
         for r in monthly_rows:
             processed_monthly.append({
-                'Dispositivo': r['device'],
-                'Energía (kWh/mes)': r['kwh_month'],
-                '% Relativo': f"{r['rel_energy']:.2f}%",
-                'Acumulado (kWh)': r['acc_kwh'],
-                '% Acumulado': f"{r['acc_rel']:.2f}%"
+                'Dispositivo': r['device'], 'Energía (kWh/mes)': r['kwh_month'],
+                '% Relativo': f"{r['rel_energy']:.2f}%", 'Acumulado (kWh)': r['acc_kwh'], '% Acumulado': f"{r['acc_rel']:.2f}%"
             })
         df_monthly = pd.DataFrame(processed_monthly)
         row_tot_month = {
-            'Dispositivo': 'TOTAL GENERAL',
-            'Energía (kWh/mes)': monthly_total,
+            'Dispositivo': 'TOTAL GENERAL', 'Energía (kWh/mes)': monthly_total,
             '% Relativo': '100.00%', 'Acumulado (kWh)': monthly_total, '% Acumulado': '100.00%'
         }
         df_monthly = pd.concat([df_monthly, pd.DataFrame([row_tot_month])], ignore_index=True)
 
-        # 4. COMPARATIVA FACTURA
         diff = abs(monthly_total - bill_real)
         perc = (diff / bill_real * 100) if bill_real > 0 else 0.0
         perc_str = f"{perc:.2f}".replace('.', ',') + "%"
@@ -716,6 +691,22 @@ class CSVController:
             "Unidad": ["kWh", "kWh", "kWh", "-"]
         })
 
+        base_24h = datetime.now().date()
+        time_24h = [datetime.combine(base_24h, time(0,0)) + timedelta(minutes=i) for i in range(1440)]
+        str_time = [t.strftime("%H:%M") for t in time_24h]
+        data_lv = {"Hora": str_time}; data_sd = {"Hora": str_time}
+        total_lv = [0.0]*1440; total_sd = [0.0]*1440
+        for ctx in ['hora_exacta', 'ciclos', 'escalones', 'aires']:
+            for dev in self.get_devices(ctx):
+                _, p_wd = self.get_typical_day_profile(ctx, dev, 'weekday')
+                _, p_we = self.get_typical_day_profile(ctx, dev, 'weekend')
+                col_name = f"{dev} [W]"
+                data_lv[col_name] = p_wd; data_sd[col_name] = p_we
+                for i in range(1440):
+                    total_lv[i] += p_wd[i]; total_sd[i] += p_we[i]
+        data_lv["TOTAL [W]"] = total_lv; data_sd["TOTAL [W]"] = total_sd
+        df_lv = pd.DataFrame(data_lv); df_sd = pd.DataFrame(data_sd)
+
         try:
             with pd.ExcelWriter(filename, engine='openpyxl') as writer:
                 df_lv.to_excel(writer, sheet_name='L-V Potencia', index=False)
@@ -723,7 +714,6 @@ class CSVController:
                 df_weekly.to_excel(writer, sheet_name='Energía de dispositivos', index=False)
                 df_monthly.to_excel(writer, sheet_name='Proyección Mensual', index=False)
                 df_bill.to_excel(writer, sheet_name='Comparativa de factura', index=False)
-                
                 for sheet_name in writer.sheets:
                     sheet = writer.sheets[sheet_name]
                     for column in sheet.columns:
@@ -735,7 +725,6 @@ class CSVController:
                             except: pass
                         adjusted_width = (max_length + 2)
                         sheet.column_dimensions[column[0].column_letter].width = adjusted_width
-
             if figures:
                 wb = openpyxl.load_workbook(filename)
                 ws = wb['Proyección Mensual']
@@ -753,36 +742,17 @@ class CSVController:
                         row_idx += 25
                 wb.save(filename)
         except Exception as e: raise CSVServiceError(f"Error escribiendo Excel: {e}")
-    
-    # --- GESTIÓN DE MEMORIA PARA GUARDADO DE PROYECTO ---
-    def set_device_config_simple(self, context_key, device_name, count, starts, ends=None):
-        if context_key in self.contexts:
-            self.contexts[context_key].device_configs[device_name] = {'type': 'simple', 'count': count, 'starts': starts, 'ends': ends or []}
-    def set_device_config_weekly(self, context_key, device_name, wd_count, wd_starts, wd_ends, we_count, we_starts, we_ends):
-        if context_key in self.contexts:
-            self.contexts[context_key].device_configs[device_name] = {
-                'type': 'weekly',
-                'weekday': {'count': wd_count, 'starts': wd_starts, 'ends': wd_ends},
-                'weekend': {'count': we_count, 'starts': we_starts, 'ends': we_ends}
-            }
+
+    # --- PERSISTENCIA ---
     def save_project_state(self, filepath: str):
         import pickle
         try:
             with open(filepath, 'wb') as f: pickle.dump(self.contexts, f)
-        except Exception as e: raise CSVServiceError(f"Error al guardar proyecto: {e}")
+        except Exception as e: raise CSVServiceError(f"Error al guardar: {e}")
     def load_project_state(self, filepath: str):
         import pickle
         try:
             with open(filepath, 'rb') as f:
-                loaded_contexts = pickle.load(f)
-            if isinstance(loaded_contexts, dict): self.contexts = loaded_contexts
-            else: raise CSVServiceError("Archivo corrupto.")
+                loaded = pickle.load(f)
+            if isinstance(loaded, dict): self.contexts = loaded
         except Exception as e: raise CSVServiceError(f"Error al cargar: {e}")
-
-    def _parse_date(self, date_str: str) -> Optional[datetime]:
-        if not date_str: return None
-        formats = ["%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
-        for fmt in formats:
-            try: return datetime.strptime(date_str.strip(), fmt)
-            except ValueError: continue
-        return None

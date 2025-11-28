@@ -5,7 +5,6 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.dates as mdates
 from datetime import timedelta
 from ui.table_view import TableView
-import numpy as np # Importamos numpy por seguridad matemática
 
 # ========================================================
 #  CLASE 1: VISTA DE GRÁFICAS (POTENCIA)
@@ -22,7 +21,8 @@ class AnalysisView(ttk.Frame):
         self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
         
         self.tabs = {}
-        for key in ['hora_exacta', 'ciclos', 'escalones', 'total']:
+        # AGREGADO 'aires'
+        for key in ['hora_exacta', 'ciclos', 'escalones', 'aires', 'total']:
             frame = ttk.Frame(self.notebook)
             title = key.replace('_', ' ').title()
             if key == 'total': title = "📊 TOTAL"
@@ -160,7 +160,7 @@ class AnalysisView(ttk.Frame):
         finally: top.config(cursor="")
 
 # ========================================================
-#  CLASE 2: VISTA DE TABLAS (ENERGÍA) + FACTURA + GRÁFICAS
+#  CLASE 2: VISTA DE TABLAS (ENERGÍA)
 # ========================================================
 class EnergySummaryView(ttk.Frame):
     def __init__(self, parent, controller=None, *args, **kwargs):
@@ -298,33 +298,23 @@ class EnergySummaryView(ttk.Frame):
             rows, grand_total = self.controller.get_monthly_projection()
             if not rows: return
 
-            # PROTECCIÓN MATEMÁTICA MEJORADA
             if grand_total < 0.0001:
-                # Limpiar y salir
-                self.ax_pie.clear(); self.ax_pie.text(0.5, 0.5, "Consumo 0 kWh", ha='center'); self.canvas_pie.draw()
-                self.ax_pareto.clear(); self.ax_pareto.text(0.5, 0.5, "Consumo 0 kWh", ha='center'); self.canvas_pareto.draw()
+                self.ax_pie.clear(); self.ax_pie.text(0.5, 0.5, "Sin Consumo", ha='center')
+                self.ax_pareto.clear(); self.ax_pareto.text(0.5, 0.5, "Sin Consumo", ha='center')
+                self.canvas_pie.draw(); self.canvas_pareto.draw()
                 return
 
             labels = [r['device'] for r in rows]
             values_kwh = [r['kwh_month'] for r in rows]
-            # Normalización segura para evitar errores de redondeo en matplotlib
             values_rel = [max(0, r['rel_energy']) for r in rows] 
             values_acc_rel = [r['acc_rel'] for r in rows]
 
             # TORTA
             self.ax_pie.clear()
-            # Desempaquetado seguro: pie siempre devuelve patches, texts y (opcional) autotexts
             pie_res = self.ax_pie.pie(
-                values_rel, 
-                labels=None, 
-                autopct='%1.1f%%', 
-                startangle=90, 
-                pctdistance=0.85, 
-                textprops={'fontsize': 8}
+                values_rel, labels=None, autopct='%1.1f%%', startangle=90, pctdistance=0.85, textprops={'fontsize': 8}
             )
-            # No necesitamos usar pie_res para nada aquí, solo se dibuja
             self.ax_pie.set_title("Distribución de Energía (%)")
-            
             legend_labels = [f"{l} ({v:.1f}%)" for l, v in zip(labels, values_rel)]
             self.ax_pie.legend(pie_res[0], legend_labels, title="Dispositivos", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1), fontsize='small')
             self.fig_pie.tight_layout()
